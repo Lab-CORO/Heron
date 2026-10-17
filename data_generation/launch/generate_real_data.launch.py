@@ -16,6 +16,8 @@ def generate_launch_description():
     scene_stabilization_max_delay_sec = LaunchConfiguration('scene_stabilization_max_delay_sec')
     world_file = LaunchConfiguration('world_file')
     cameras_config_file = LaunchConfiguration('cameras_config_file')
+    robot_config_file = LaunchConfiguration('robot_config_file')
+    base_link = LaunchConfiguration('base_link')
 
 
     voxel_size_arg = DeclareLaunchArgument(
@@ -67,6 +69,15 @@ def generate_launch_description():
         'bag_file',
         default_value="",  # Set the path to your bag file
     )
+    # Robot selection: empty robot_config_file -> curobo falls back to its default (m1013 / leeloo)
+    robot_config_file_arg = DeclareLaunchArgument(
+        'robot_config_file',
+        default_value="",
+    )
+    base_link_arg = DeclareLaunchArgument(
+        'base_link',
+        default_value="base_0",  # curobo ConfigManager legacy default (m1013/leeloo)
+    )
     return LaunchDescription([
         init_batch_size_arg,
         voxel_size_arg,
@@ -80,10 +91,16 @@ def generate_launch_description():
         world_file_arg,
         cameras_config_file_arg,
         bag_file_arg,
-        # Launch the curobo_ik node
+        robot_config_file_arg,
+        base_link_arg,
+        # Replay the bag. /tf and /tf_static are required so curobo can resolve the
+        # camera extrinsics from TF (base_link -> camera frame) when the camera pose
+        # is NOT hardcoded in cameras.yaml (extrinsics: []).
         ExecuteProcess(
             cmd=['ros2', 'bag', 'play', bag_file, '--loop',
-                 '--topics', '/masked_depth_image/camera_info', '/masked_depth_image/image_raw'],
+                 '--topics',
+                 '/masked_depth_image/camera_info', '/masked_depth_image/image_raw',
+                 '/tf', '/tf_static'],
             output='screen',
         ),
         Node(
@@ -95,7 +112,9 @@ def generate_launch_description():
                 {"voxel_size": voxel_size,
                 "init_batch_size": init_batch_size,
                 "world_file": world_file,
-                "cameras_config_file": cameras_config_file}
+                "cameras_config_file": cameras_config_file,
+                "robot_config_file": robot_config_file,
+                "base_link": base_link}
             ]
         ),
         # Launch the obstacle_adder node
