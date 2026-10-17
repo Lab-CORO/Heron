@@ -10,6 +10,14 @@ Usage (inside Apptainer container):
         --config     /workspace/unet_3d/experiments/<exp>/config.yaml \
         --checkpoint /workspace/unet_3d/experiments/<exp>/checkpoint/best_checkpoint.pytorch \
         --output_dir /workspace/unet_3d/experiments/<exp>/evaluation
+
+This run also writes <output_dir>/eval_data.h5, holding everything needed to
+regenerate the plots/report without rerunning inference (confusion matrices,
+error-histogram bins, scalar regression metrics, and the 3 sample volumes used
+for regions_N.png). To redo just the figures later (e.g. after tweaking a plot
+function), reuse that cache:
+
+    python evaluate.py --output_dir /workspace/unet_3d/experiments/<exp>/evaluation --plot_only
 """
 import argparse
 import os
@@ -53,10 +61,16 @@ def load_model(config, checkpoint_path):
 # =============================================================================
 
 def normalize(arr):
-    mean, std = arr.mean(), arr.std()
-    if std < 1e-8:
-        return arr - mean
-    return (arr - mean) / std
+    """Match pytorch3dunet Normalize (min-max to [-1, 1]) used at training time.
+
+    z-score here silently breaks BatchNorm models: their tiny running_var buffers
+    (calibrated to the [-1,1] training distribution) amplify any input-distribution
+    shift into garbage. GroupNorm renormalizes per instance so it tolerated the
+    mismatch, which is what masked this bug on the gcr baselines.
+    """
+    mn, mx = float(arr.min()), float(arr.max())
+    norm01 = (arr - mn) / (mx - mn + 1e-10)
+    return np.clip(2.0 * norm01 - 1.0, -1.0, 1.0).astype(np.float32)
 
 
 def predict_file(model, device, filepath):
@@ -76,6 +90,7 @@ def predict_file(model, device, filepath):
 
 
 N_CLASSES = 51  # reachability index is a fraction of 50 -> classes 0..50
+REGION_NAMES = ["reachable", "graded", "thin"]
 
 
 def to_classes(arr):
@@ -118,11 +133,17 @@ def region_masks(label_cls, label_cont, grad_pct=99.0):
 # =============================================================================
 
 def regression_metrics(preds, labels):
-    diff = preds - labels
-    mae  = float(np.mean(np.abs(diff)))
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-    r, _ = pearsonr(preds, labels)
-    return {"MAE": mae, "RMSE": rmse, "Pearson_r": float(r)}
+    # float64 throughout: at N=4B, float32 accumulation loses precision and saturates
+    # pearsonr to 1.000000 (terms ~1e-10 fall below float32 eps once sum > 1e-3).
+    p = preds.astype(np.float64)
+    l = labels.astype(np.float64)
+    diff = p - l
+    abs_diff = np.abs(diff)
+    mae   = float(np.mean(abs_diff))
+    medae = float(np.median(abs_diff))  # stored so the error histogram can be replotted from cached bins alone
+    rmse  = float(np.sqrt(np.mean(diff ** 2)))
+    r, _ = pearsonr(p, l)
+    return {"MAE": mae, "MedAE": medae, "RMSE": rmse, "Pearson_r": float(r)}
 
 
 def confusion_matrix(pred_cls, label_cls, n_classes=N_CLASSES):
@@ -305,14 +326,24 @@ def plot_tolerance_curves(region_cm, region_n, output_path, thresh=0.95, kmax=15
     plt.close()
 
 
-def plot_error_histogram(preds, labels, output_path):
+def compute_error_histogram(preds, labels, bins=100):
+    """Bin |pred - label| once, at predict time, so the histogram plot can later be
+    redrawn from these small arrays alone instead of the (potentially huge) raw
+    per-voxel preds/labels."""
+    errors = np.abs(preds.astype(np.float64) - labels.astype(np.float64))
+    counts, edges = np.histogram(errors, bins=bins, density=True)
+    return counts, edges
+
+
+def plot_error_histogram(hist_counts, hist_edges, mean_err, median_err, output_path):
     if not _HAS_MATPLOTLIB:
         return
-    errors = np.abs(preds - labels)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(errors, bins=100, color="steelblue", edgecolor="none", density=True)
-    ax.axvline(errors.mean(), color="red",    linestyle="--", label=f"Mean  {errors.mean():.4f}")
-    ax.axvline(np.median(errors), color="orange", linestyle="--", label=f"Median {np.median(errors):.4f}")
+    widths = np.diff(hist_edges)
+    ax.bar(hist_edges[:-1], hist_counts, width=widths, align="edge",
+           color="steelblue", edgecolor="none")
+    ax.axvline(mean_err,   color="red",    linestyle="--", label=f"Mean  {mean_err:.4f}")
+    ax.axvline(median_err, color="orange", linestyle="--", label=f"Median {median_err:.4f}")
     ax.set_xlabel("|pred − label|")
     ax.set_ylabel("Density")
     ax.set_title("Absolute Error Distribution (all val voxels)")
@@ -373,6 +404,61 @@ def plot_region_slices(samples, output_dir):
 
 
 # =============================================================================
+#  PERSISTENCE (cache data needed to regenerate figures without rerunning inference)
+# =============================================================================
+
+EVAL_DATA_FILENAME = "eval_data.h5"
+
+
+def save_eval_data(path, global_cm, region_cm, n_files, global_reg,
+                    hist_counts, hist_edges, region_samples):
+    """Persist everything generate_outputs() needs, so plots/report can be redone
+    later via --plot_only without rerunning the model over the val set."""
+    with h5py.File(path, "w") as f:
+        f.attrs["n_files"] = n_files
+        for k, v in global_reg.items():
+            f.attrs[k] = v
+
+        f.create_dataset("global_cm", data=global_cm, compression="gzip")
+        cm_grp = f.create_group("region_cm")
+        for r in REGION_NAMES:
+            cm_grp.create_dataset(r, data=region_cm[r], compression="gzip")
+
+        f.create_dataset("hist_counts", data=hist_counts, compression="gzip")
+        f.create_dataset("hist_edges", data=hist_edges, compression="gzip")
+
+        samples_grp = f.create_group("region_samples")
+        for i, (pred, label, raw) in enumerate(region_samples):
+            sg = samples_grp.create_group(str(i))
+            sg.create_dataset("pred", data=pred, compression="gzip")
+            sg.create_dataset("label", data=label, compression="gzip")
+            sg.create_dataset("raw", data=raw, compression="gzip")
+
+
+def load_eval_data(path):
+    with h5py.File(path, "r") as f:
+        global_cm = f["global_cm"][:]
+        region_cm = {r: f["region_cm"][r][:] for r in REGION_NAMES}
+        n_files = int(f.attrs["n_files"])
+        global_reg = {"MAE": float(f.attrs["MAE"]), "MedAE": float(f.attrs["MedAE"]),
+                      "RMSE": float(f.attrs["RMSE"]), "Pearson_r": float(f.attrs["Pearson_r"])}
+        hist_counts = f["hist_counts"][:]
+        hist_edges = f["hist_edges"][:]
+
+        region_samples = []
+        sg = f["region_samples"]
+        for k in sorted(sg.keys(), key=int):
+            grp = sg[k]
+            region_samples.append((grp["pred"][:], grp["label"][:], grp["raw"][:]))
+
+    return {
+        "global_cm": global_cm, "region_cm": region_cm, "n_files": n_files,
+        "global_reg": global_reg, "hist_counts": hist_counts, "hist_edges": hist_edges,
+        "region_samples": region_samples,
+    }
+
+
+# =============================================================================
 #  REPORT
 # =============================================================================
 
@@ -384,6 +470,7 @@ def print_header(title):
 def print_metrics(reg, cls):
     print(f"\n  -- Regression (continuous) --")
     print(f"  MAE       : {reg['MAE']:.6f}")
+    print(f"  MedAE     : {reg['MedAE']:.6f}")
     print(f"  RMSE      : {reg['RMSE']:.6f}")
     print(f"  Pearson r : {reg['Pearson_r']:.6f}")
     print(f"\n  -- Classification (51 classes, 0–50) --")
@@ -424,6 +511,7 @@ def save_report(reg, cls, output_path, n_files, n_voxels, region_cls=None, regio
         f.write(f"Voxels    : {n_voxels:,}\n\n")
         f.write("-- Regression (continuous) --\n")
         f.write(f"MAE       : {reg['MAE']:.6f}\n")
+        f.write(f"MedAE     : {reg['MedAE']:.6f}\n")
         f.write(f"RMSE      : {reg['RMSE']:.6f}\n")
         f.write(f"Pearson r : {reg['Pearson_r']:.6f}\n\n")
         f.write("-- Classification (51 classes, 0-50; class = round(value*50)) --\n")
@@ -453,39 +541,56 @@ def save_report(reg, cls, output_path, n_files, n_voxels, region_cls=None, regio
 #  MAIN
 # =============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="CapaciNet evaluation: regression + 51-class (0–50) classification")
-    parser.add_argument("--config",     required=True, help="Path to experiment config.yaml")
-    parser.add_argument("--checkpoint", required=True, help="Path to best_checkpoint.pytorch")
-    parser.add_argument("--output_dir", required=True, help="Directory where results are saved")
-    parser.add_argument("--val_dir",    default=None,
-                        help="Override val directory from config (useful when config has container paths)")
-    args = parser.parse_args()
+def generate_outputs(output_dir, global_cm, region_cm, n_files, global_reg,
+                      hist_counts, hist_edges, region_samples):
+    """Everything downstream of the raw per-voxel predictions: metrics, plots,
+    report. Called both right after inference and from --plot_only (loaded
+    from the eval_data.h5 cache), so it must not touch the model/val files."""
+    global_n = int(global_cm.sum())
+    region_n = {r: int(region_cm[r].sum()) for r in REGION_NAMES}
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    global_cls = merge_class_metrics(global_cm, n_voxels=global_n)
+    region_cls = {r: merge_class_metrics(region_cm[r], n_voxels=region_n[r]) for r in REGION_NAMES}
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    print_header("Global Results")
+    print(f"  Val files : {n_files}")
+    print(f"  Voxels    : {global_n:,}")
+    print_metrics(global_reg, global_cls)
+    print_region_metrics(region_cls, region_n)
 
-    val_dirs = [args.val_dir] if args.val_dir else config["loaders"]["val"]["file_paths"]
-    val_files = []
-    for d in val_dirs:
-        val_files += sorted(
-            os.path.join(d, fn) for fn in os.listdir(d) if fn.endswith(".h5")
-        )
+    plot_confusion_matrix(global_cls, os.path.join(output_dir, "confusion_matrix.png"))
+    plot_error_histogram(hist_counts, hist_edges, global_reg["MAE"], global_reg["MedAE"],
+                         os.path.join(output_dir, "error_histogram.png"))
+    plot_tolerance_curves(region_cm, region_n, os.path.join(output_dir, "tolerance_curve.png"),
+                          global_cm=global_cm, global_n=global_n)
+    plot_region_slices(region_samples, output_dir)
+    np.savez_compressed(os.path.join(output_dir, "confusion_matrices.npz"),
+                        global_cm=global_cm, **{f"{r}_cm": region_cm[r] for r in REGION_NAMES})
+    save_report(global_reg, global_cls, os.path.join(output_dir, "report.txt"),
+                n_files=n_files, n_voxels=global_n,
+                region_cls=region_cls, region_n=region_n)
 
-    print_header(f"CapaciNet Evaluation  |  {len(val_files)} val files")
-    print(f"  Checkpoint : {args.checkpoint}")
-    print(f"  Classes    : {N_CLASSES} (0–50, class = round(value*50))")
+    print(f"\n  Saved to: {output_dir}/")
+    if _HAS_MATPLOTLIB:
+        print(f"    confusion_matrix.png")
+        print(f"    error_histogram.png")
+        print(f"    tolerance_curve.png")
+        print(f"    regions_0.png .. regions_{min(2, len(region_samples) - 1)}.png")
+    else:
+        print(f"    (plots skipped — matplotlib not available)")
+    print(f"    confusion_matrices.npz")
+    print(f"    report.txt\n")
 
-    model, device = load_model(config, args.checkpoint)
+
+def run_inference(config, checkpoint, val_files):
+    """Run the model over every val file and accumulate everything
+    generate_outputs()/save_eval_data() need. Returns a dict matching
+    load_eval_data()'s shape (plus n_files)."""
+    model, device = load_model(config, checkpoint)
 
     all_preds, all_labels = [], []
     global_cm = np.zeros((N_CLASSES, N_CLASSES), dtype=np.int64)
-    # per-region accumulated confusion matrices + voxel counts
-    region_names = ["reachable", "graded", "thin"]
-    region_cm = {r: np.zeros((N_CLASSES, N_CLASSES), dtype=np.int64) for r in region_names}
-    region_n  = {r: 0 for r in region_names}
+    region_cm = {r: np.zeros((N_CLASSES, N_CLASSES), dtype=np.int64) for r in REGION_NAMES}
     region_samples = []   # first 3 (pred, label, raw) volumes for region_slices plot
 
     for i, fp in enumerate(val_files):
@@ -508,48 +613,76 @@ def main():
         for r, m in region_masks(label_cls, label).items():
             if m.any():
                 region_cm[r] += confusion_matrix(pred_cls[m], label_cls[m])
-                region_n[r]  += int(m.sum())
 
         print(f"  [{i+1:4d}/{len(val_files)}] {fname:<45} "
               f"MAE={reg['MAE']:.4f}  Exact={cls['ExactAccuracy']:.4f}  "
               f"±1={cls['Within1Accuracy']:.4f}  QWK={cls['QuadraticKappa']:.4f}")
 
-    # Global aggregate
     all_preds  = np.concatenate(all_preds)
     all_labels = np.concatenate(all_labels)
 
     global_reg = regression_metrics(all_preds, all_labels)
-    global_cls = merge_class_metrics(global_cm, n_voxels=len(all_preds))
-    region_cls = {r: merge_class_metrics(region_cm[r], n_voxels=region_n[r]) for r in region_names}
+    hist_counts, hist_edges = compute_error_histogram(all_preds, all_labels)
 
-    print_header("Global Results")
-    print(f"  Val files : {len(val_files)}")
-    print(f"  Voxels    : {len(all_preds):,}")
-    print_metrics(global_reg, global_cls)
-    print_region_metrics(region_cls, region_n)
+    return {
+        "global_cm": global_cm, "region_cm": region_cm, "n_files": len(val_files),
+        "global_reg": global_reg, "hist_counts": hist_counts, "hist_edges": hist_edges,
+        "region_samples": region_samples,
+    }
 
-    # Save outputs
-    plot_confusion_matrix(global_cls, os.path.join(args.output_dir, "confusion_matrix.png"))
-    plot_error_histogram(all_preds, all_labels, os.path.join(args.output_dir, "error_histogram.png"))
-    plot_tolerance_curves(region_cm, region_n, os.path.join(args.output_dir, "tolerance_curve.png"),
-                          global_cm=global_cm, global_n=len(all_preds))
-    plot_region_slices(region_samples, args.output_dir)
-    np.savez_compressed(os.path.join(args.output_dir, "confusion_matrices.npz"),
-                        global_cm=global_cm, **{f"{r}_cm": region_cm[r] for r in region_names})
-    save_report(global_reg, global_cls, os.path.join(args.output_dir, "report.txt"),
-                n_files=len(val_files), n_voxels=len(all_preds),
-                region_cls=region_cls, region_n=region_n)
 
-    print(f"\n  Saved to: {args.output_dir}/")
-    if _HAS_MATPLOTLIB:
-        print(f"    confusion_matrix.png")
-        print(f"    error_histogram.png")
-        print(f"    tolerance_curve.png")
-        print(f"    regions_0.png .. regions_{min(2, len(val_files)-1)}.png")
-    else:
-        print(f"    (plots skipped — matplotlib not available)")
-    print(f"    confusion_matrices.npz")
-    print(f"    report.txt\n")
+def main():
+    parser = argparse.ArgumentParser(description="CapaciNet evaluation: regression + 51-class (0–50) classification")
+    parser.add_argument("--config",     default=None, help="Path to experiment config.yaml")
+    parser.add_argument("--checkpoint", default=None, help="Path to best_checkpoint.pytorch")
+    parser.add_argument("--output_dir", required=True, help="Directory where results are saved")
+    parser.add_argument("--val_dir",    default=None,
+                        help="Override val directory from config (useful when config has container paths)")
+    parser.add_argument("--plot_only", action="store_true",
+                        help="Skip inference; reload <output_dir>/eval_data.h5 from a previous run "
+                             "and only regenerate the plots/report.")
+    args = parser.parse_args()
+
+    if not args.plot_only and (args.config is None or args.checkpoint is None):
+        parser.error("--config and --checkpoint are required unless --plot_only is set")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    data_path = os.path.join(args.output_dir, EVAL_DATA_FILENAME)
+
+    if args.plot_only:
+        print_header(f"CapaciNet Evaluation  |  plot-only (cached data)")
+        print(f"  Loading   : {data_path}")
+        data = load_eval_data(data_path)
+        generate_outputs(args.output_dir, data["global_cm"], data["region_cm"], data["n_files"],
+                         data["global_reg"], data["hist_counts"], data["hist_edges"],
+                         data["region_samples"])
+        return
+
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
+
+    val_dirs = [args.val_dir] if args.val_dir else config["loaders"]["val"]["file_paths"]
+    val_files = []
+    for d in val_dirs:
+        val_files += sorted(
+            os.path.join(d, fn) for fn in os.listdir(d) if fn.endswith(".h5")
+        )
+
+    print_header(f"CapaciNet Evaluation  |  {len(val_files)} val files")
+    print(f"  Checkpoint : {args.checkpoint}")
+    print(f"  Classes    : {N_CLASSES} (0–50, class = round(value*50))")
+
+    data = run_inference(config, args.checkpoint, val_files)
+
+    save_eval_data(data_path, data["global_cm"], data["region_cm"], data["n_files"],
+                   data["global_reg"], data["hist_counts"], data["hist_edges"],
+                   data["region_samples"])
+    print(f"\n  Cached prediction data -> {data_path}")
+    print(f"  (rerun with --plot_only to regenerate figures without predicting again)")
+
+    generate_outputs(args.output_dir, data["global_cm"], data["region_cm"], data["n_files"],
+                     data["global_reg"], data["hist_counts"], data["hist_edges"],
+                     data["region_samples"])
 
 
 if __name__ == "__main__":
