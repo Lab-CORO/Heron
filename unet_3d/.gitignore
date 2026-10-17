@@ -1,1 +1,7 @@
 data*/
+# data*/ also matches this experiment directory; keep its config.yaml/job.sh
+!experiments/data_002_scratch_128_20260518_1315/
+
+# Checkpoints and evaluation by-products
+**/checkpoint/
+script/eval_logs/
