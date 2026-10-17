@@ -1,0 +1,1 @@
+Test pour patch de 64 afin de permettre un meilleur temps reel. Echec a cause de la segementation en patch de 64 pour l'entrainement. La loss function dice n'est pas capable de converger sans information global.

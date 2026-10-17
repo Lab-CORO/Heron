@@ -1,0 +1,1 @@
+Train avec dataset synthetique. Test avec CBR (relu comparer a ELU)

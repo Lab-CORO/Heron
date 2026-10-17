@@ -1,0 +1,82 @@
+manual_seed: 42
+
+# Same setup as cbe_128_batch4_real but with ReLU instead of ELU.
+# ReLU is the industry default for BN models and folds cleanly into Conv at TRT inference.
+# ELU avoids dead neurons; ReLU can suffer dying-ReLU with poor init or high LR,
+# but with BN renormalization this is rarely an issue in practice.
+# Training from scratch (no pre_trained) for a clean cbe vs cbr comparison.
+
+model:
+  name: UNet3D
+  in_channels: 1
+  out_channels: 1
+  final_sigmoid: true
+  f_maps: [16, 32, 64, 128, 256]
+  layer_order: cbr          # Conv -> BatchNorm -> ReLU. Same TRT foldability as cbe.
+
+loss:
+  name: BCEDiceLoss
+
+eval_metric:
+  name: DiceCoefficient
+
+optimizer:
+  learning_rate: 5.0e-05
+  weight_decay: 1.0e-05
+
+lr_scheduler:
+  name: ReduceLROnPlateau
+  mode: max
+  factor: 0.5
+  patience: 50
+  cooldown: 10
+  min_lr: 1.0e-08
+
+trainer:
+  eval_score_higher_is_better: true
+  checkpoint_dir: "/workspace/unet_3d/experiments/cbr_128_batch4_real/checkpoint"
+  resume: null
+  pre_trained: null
+  validate_after_iters: 50
+  log_after_iters: 50
+  max_num_epochs: 5000        # 7493 files / batch 4 = ~1873 iters/epoch → hard cap at 100k iters
+  max_num_iterations: 100000 # hard cap; LR scheduler will reduce well before this
+
+loaders:
+  dataset: LazyHDF5Dataset
+  batch_size: 4
+  num_workers: 4
+  raw_internal_path: raw
+  label_internal_path: label
+
+  train:
+    file_paths: ["/workspace/unet_3d/data_002/train"]
+    slice_builder:
+      name: SliceBuilder
+      patch_shape: [128, 128, 128]
+      stride_shape: [128, 128, 128]
+    transformer:
+      raw:
+        - name: Normalize
+        - name: ToTensor
+          expand_dims: true
+      label:
+        - name: Identity
+        - name: ToTensor
+          expand_dims: true
+
+  val:
+    file_paths: ["/workspace/unet_3d/data_002/val"]
+    slice_builder:
+      name: SliceBuilder
+      patch_shape: [128, 128, 128]
+      stride_shape: [128, 128, 128]
+    transformer:
+      raw:
+        - name: Normalize
+        - name: ToTensor
+          expand_dims: true
+      label:
+        - name: Identity
+        - name: ToTensor
+          expand_dims: true

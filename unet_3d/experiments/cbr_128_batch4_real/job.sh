@@ -1,0 +1,27 @@
+#!/bin/bash
+#SBATCH --account=def-jerobg
+#SBATCH --job-name=cbr_128_batch4_real
+#SBATCH --output=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/cbr_128_batch4_real/logs/slurm_%j.out
+#SBATCH --error=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/cbr_128_batch4_real/logs/slurm_%j.err
+#SBATCH --time=30:00:00
+#SBATCH --mem=64G
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --export=ALL,DISABLE_DCGM=1
+
+set -e
+
+mkdir -p /lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/cbr_128_batch4_real/logs
+mkdir -p /lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/cbr_128_batch4_real/checkpoint
+
+cd /lustre06/project/6089348/willore
+
+module load apptainer
+
+apptainer exec -C --nv \
+    --bind ./CapaciNet/:/workspace/ \
+    --bind /lustre06/project/6089348/willore/CapaciNet/unet_3d/custom/losses.py:/opt/conda/lib/python3.10/site-packages/pytorch3dunet/unet3d/losses.py \
+    /lustre06/project/6089348/willore/capa_unet.sif \
+    train3dunet --config /workspace/unet_3d/experiments/cbr_128_batch4_real/config.yaml
+
+echo "==> Training complete: cbr_128_batch4_real"
