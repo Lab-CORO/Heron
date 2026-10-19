@@ -17,15 +17,16 @@
 # Expected environment (exported by gen_dataset.sh):
 #   MODE, VOXEL, DATASET_SIZE, BATCH_SIZE, INIT_BATCH_SIZE, OBJ_MAX, REACH_MAX,
 #   ROBOT_CONFIG_FILE, BASE_LINK, WORLD_FILE, CAMERA_FRAME
+#   HERON_SCENE_HALF_EXTENT  station scene half extent (m), read by the patched obstacle_manager.py
+#   ROBOT_CONFIG_BIND  host dir of a robot config that is not built into the image (may be empty)
 #   DATA_DIR         host dir bound to .../share/data_generation/data (assets + output)
 #   LAUNCH_DIR       host dir bound to .../share/data_generation/launch (parametrized launches)
 #   SIF              path to data_generation.sif
 #   WARP_CACHE       host warp cache dir
 #   ROSBAG_DIR       (real only) host rosbag directory to stage to local SSD
-#   CUROBO_PATCH_DIR (scene only) host dir with obstacle_manager.py / ros_service_manager.py,
-#                    bind-mounted over curobo_ros's installed copies -- adds the
-#                    /curobo_ik/load_voxel_scene service (native ESDF path used by
-#                    load_scene.py) without rebuilding the .sif. See pipeline/curobo_patch/.
+#   CUROBO_PATCH_DIR host dir with obstacle_manager.py / ros_service_manager.py, bind-mounted
+#                    over curobo_ros's installed copies without rebuilding the .sif.
+#                    See pipeline/curobo_patch/README.md.
 
 module load apptainer
 module load hdf5/1.14.2
@@ -91,19 +92,28 @@ if [ "${MODE}" = "real" ]; then
   BINDS+=( --bind "${SLURM_TMPDIR}/rosbag":/home/ros2_ws/rosbag )
 fi
 
-if [ "${MODE}" = "scene" ]; then
-  CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
-  for f in obstacle_manager.py ros_service_manager.py; do
-    [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
-    BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
-  done
+# curobo_ros files patched without rebuilding the image (see curobo_patch/README.md).
+# obstacle_manager.py reads the station's scene extent (HERON_SCENE_HALF_EXTENT), so
+# every mode needs it; ros_service_manager.py only adds the scene-mode service.
+CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
+PATCHED=( obstacle_manager.py )
+[ "${MODE}" = "scene" ] && PATCHED+=( ros_service_manager.py )
+for f in "${PATCHED[@]}"; do
+  [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
+  BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
+done
+# A robot whose curobo config lives on the host: mount its directory (config, URDF,
+# meshes) at the same path, so absolute paths inside the config keep working.
+if [ -n "${ROBOT_CONFIG_BIND:-}" ]; then
+  BINDS+=( --bind "${ROBOT_CONFIG_BIND}":"${ROBOT_CONFIG_BIND}":ro )
 fi
 
 # apptainer is run with -C (--contain), which ISOLATES the environment: host env
 # vars are NOT visible inside the container. Forward the parameters explicitly by
 # exporting them with the APPTAINERENV_ prefix (apptainer strips the prefix inside).
 for v in MODE VOXEL DATASET_SIZE BATCH_SIZE INIT_BATCH_SIZE OBJ_MAX REACH_MAX \
-         ROBOT_CONFIG_FILE BASE_LINK WORLD_FILE CAMERA_FRAME SLURM_ARRAY_TASK_ID; do
+         ROBOT_CONFIG_FILE BASE_LINK WORLD_FILE CAMERA_FRAME SLURM_ARRAY_TASK_ID \
+         HERON_SCENE_HALF_EXTENT; do
   export "APPTAINERENV_${v}=${!v-}"
 done
 

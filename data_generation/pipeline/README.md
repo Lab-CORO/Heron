@@ -2,19 +2,27 @@
 
 One command to generate CapaciNet datasets — **real** (from a rosbag),
 **synthetic**, or **scene** (from occupancy grids you already have), for **any
-robot** (leeloo/m1013, ur5e, jaco7, iiwa…) — and to (re)build a robot's master
-reachability map.
+robot** (m1013, ur5e, jaco7, iiwa…) in any **station** (leeloo, bare…) — and to
+(re)build a robot's master map.
 
 ```
 data_generation/pipeline/
   gen_dataset.sh      # the single entry point (run on a login node; submits SLURM)
   job.sbatch          # generic SLURM job (don't run directly)
   run_generation.sh   # in-container launcher (staged into the data dir)
-  robots/<name>.env   # robot registry: robot_config_file, base_link, master_ik dir, world
   split_scenes.py     # (scene mode) host-side: scenes.h5 -> one .npz per scene
   load_scene.py       # (scene mode) in-container: inject scene into curobo, trigger RM
-  curobo_patch/       # (scene mode) curobo_ros files bind-mounted over the .sif's copies
+  curobo_patch/       # curobo_ros files bind-mounted over the .sif's copies (see its README)
   verify_voxel_esdf.py / .sbatch   # one-off GPU check of the native ESDF path
+```
+
+Robots and stations are described once, at the repository root, in
+`robots/<name>.yaml` and `stations/<name>.yaml`, and read through the `heron`
+package (see `GLOSSARY.md` for the terms). List and inspect them with:
+
+```bash
+PYTHONPATH=CapaciNet python3 -m heron robots             # m1013, ur5e, iiwa, jaco7
+PYTHONPATH=CapaciNet python3 -m heron stations leeloo    # scene grid and 128³ crop at 0.02
 ```
 
 ## Usage
@@ -22,34 +30,41 @@ data_generation/pipeline/
 ```bash
 # Real dataset from a rosbag (camera extrinsics resolved from /tf):
 CapaciNet/data_generation/pipeline/gen_dataset.sh \
-    --robot leeloo --mode real \
+    --robot m1013 --station leeloo --mode real \
     --rosbag /path/rosbag2_2026_06_02-20_58_42_0.db3 \
     --camera-frame <camera_optical_frame> \
     --array 100 --dataset-size 10 --out real_long
 
 # Synthetic dataset for another robot:
-gen_dataset.sh --robot ur5e --mode synthetic --array 500 --obj-max 20 --out ur5e_syn
+gen_dataset.sh --robot ur5e --station bare --mode synthetic --array 500 --obj-max 20 --out ur5e_syn
 
 # (Re)generate a robot's master_ik_data<voxel>.npz (run once per robot/voxel):
 gen_dataset.sh --robot jaco7 --mode create_rm --voxel 0.02
 
 # Dataset from scenes you already have as occupancy grids (one array task per scene):
-gen_dataset.sh --robot leeloo --mode scene \
+gen_dataset.sh --robot m1013 --station leeloo --mode scene \
     --scene-file /path/scenes.h5 --out scene_batch1
 ```
+
+`--station` is required for every mode except `create_rm`, since a master map
+belongs to the robot alone. New master maps are written to
+`<data root>/master_maps/<robot>/<voxel>/`; maps generated before that
+(`data/`, `data_ur5e/`, `data_iiwa/`, `data_jaco7/`) are still found.
+`HERON_DATA_ROOT` sets the data root (default: the directory containing `CapaciNet/`).
 
 Add `--dry-run` to print the `sbatch` command and the staging steps without
 submitting or touching the filesystem. `--help` lists all options.
 
 ### Key options
-`--robot` `--mode {real|synthetic|scene|create_rm}` `--out <name>` `--rosbag <path>`
+`--robot` `--station` `--mode {real|synthetic|scene|create_rm}` `--out <name>` `--rosbag <path>`
 `--camera-frame <frame>` `--scene-file <path>` `--scene-h5-path <template>`
 `--scene-occupied-value <int>` `--array <N|a-b>` `--voxel 0.02` `--dataset-size`
 `--batch-size` `--init-batch-size` `--obj-max` `--reach-max` `--time` `--sif`.
 
 ## How it works
 
-`gen_dataset.sh` sources `robots/<robot>.env`, validates inputs, stages a per-run
+`gen_dataset.sh` reads the robot and station through `heron shell-env` (which
+validates both files and their compatibility), validates the other inputs, stages a per-run
 **output directory** under `datasets/<out>/` (the robot `master_ik` is **hardlinked**
 in — instant, no extra disk), stages the rosbag to `$SCRATCH/rosbag/` for `real`,
 and submits `job.sbatch` as an array, passing every parameter via `--export`.
@@ -93,7 +108,7 @@ Use this when the environment is already known as a **dense occupancy voxel grid
 (not a rosbag to replay, not random cubes). One array task = one scene.
 
 ```bash
-gen_dataset.sh --robot leeloo --mode scene --scene-file scenes.h5 --out scene_batch1
+gen_dataset.sh --robot m1013 --station leeloo --mode scene --scene-file scenes.h5 --out scene_batch1
 ```
 
 By default, `scenes.h5` is expected to follow the same layout the pipeline
@@ -117,7 +132,7 @@ attributes, and **occupancy convention `-1` = occupied, `1` = free** (matches
   comment.
 
 ```bash
-gen_dataset.sh --robot leeloo --mode scene --scene-file scenes.h5 \
+gen_dataset.sh --robot m1013 --station leeloo --mode scene --scene-file scenes.h5 \
     --scene-h5-path 'voxel_grid/{i}' --scene-occupied-value 0 --out scene_batch1
 ```
 
@@ -159,12 +174,9 @@ parallel and total wall time is set by the queue, not by the scene count.
 (`obstacle_manager.py`, `ros_service_manager.py`, copied from the image and
 extended). `job.sbatch` bind-mounts them over the container's installed copies —
 same trick already used for `DATA_DIR` / `LAUNCH_DIR`. Nothing is recompiled.
-
-> **Keep the patch in sync.** These files are forks of the versions inside
-> `docker_images/data_generation.sif`. If that image is ever rebuilt with a newer
-> `curobo_ros`, re-copy them from the new image and re-apply `load_voxel_scene` /
-> `get_scene_voxel_grid` / `_callback_load_voxel_scene`, or the bind-mount will
-> silently revert unrelated upstream fixes.
+`curobo_patch/README.md` lists every patched file, why, and what to do when the
+image is rebuilt; `docs/adr/0001-patch-container-files-by-bind-mount.md` records
+why the image is patched this way.
 
 ### Why the HDF5 is split up front
 

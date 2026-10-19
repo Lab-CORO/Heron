@@ -401,15 +401,13 @@ class ObstacleManager:
             GetVoxelGridResponse: Response object with voxel grid data.
         """
         voxel_size = node.get_parameter('voxel_size').get_parameter_value().double_value
-        min_x, min_y, min_z = float('inf'), float('inf'), float('inf')
-        max_x, max_y, max_z = float('-inf'), float('-inf'), float('-inf')
-
-        max_x = 1.52
-        max_y = 1.52
-        max_z = 1.52
-        min_x = -1.52
-        min_y = -1.52
-        min_z = -1.52
+        # HERON PATCH: the scene extent is a property of the Station, passed by the
+        # Heron pipeline as HERON_SCENE_HALF_EXTENT (meters). The image hard-codes
+        # 1.52, which stays the default (also when the variable is set but empty,
+        # as in create_rm, which has no station).
+        half_extent = float(os.environ.get('HERON_SCENE_HALF_EXTENT') or '1.52')
+        max_x = max_y = max_z = half_extent
+        min_x = min_y = min_z = -half_extent
 
         grid_size_x = int(np.ceil((max_x - min_x) / voxel_size))
         grid_size_y = int(np.ceil((max_y - min_y) / voxel_size))
