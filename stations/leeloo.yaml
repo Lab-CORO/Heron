@@ -1,0 +1,7 @@
+# Leeloo: the m1013 on its mobile base, with a camera pole.
+name: leeloo
+world: ../data_generation/config/leeloo_world.yaml
+cameras: ../data_generation/config/cameras.tf.yaml   # template for rosbag datasets
+camera_frame: ""                                     # pass --camera-frame for rosbag datasets
+scene_half_extent: 1.52      # m -> 152³ voxels at 0.02
+crop_offset: [0.0, 0.0, 0.16]  # m -> the 128³ crop 12 140 12 140 20 148 at 0.02

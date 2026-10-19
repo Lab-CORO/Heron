@@ -1,0 +1,4 @@
+# No fixed obstacles beyond curobo's default floor. For robots without a station of their own.
+name: bare
+scene_half_extent: 1.52      # m -> 152³ voxels at 0.02
+crop_offset: [0.0, 0.0, 0.0]

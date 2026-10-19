@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heron"
+version = "0.1.0"
+description = "Reachability datasets and 3D U-Net training for robot workspaces"
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+heron = "heron.cli:main"
+
+[tool.setuptools]
+packages = ["heron"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
