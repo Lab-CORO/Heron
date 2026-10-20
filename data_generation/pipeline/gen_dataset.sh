@@ -154,6 +154,14 @@ submit() {  # submit <data_dir> <extra_export> <sbatch_opts...>
 # Run a filesystem-mutating command, or just describe it under --dry-run.
 fs() { if [ "$DRY_RUN" -eq 1 ]; then echo "(dry-run) would: $*"; else "$@"; fi; }
 
+# Record where a dataset comes from (datasets/<out>/dataset.yaml), so a Corpus can
+# check robot / station / voxel size and split by source. --force: rerunning into the
+# same --out rewrites it.
+describe_dataset() {  # describe_dataset <source>
+  fs env PYTHONPATH="${REPO_ROOT}" python3 -m heron dataset describe "$DATA_DIR" \
+    --robot "$ROBOT" --station "$STATION" --mode "$MODE" --voxel "$VOXEL" --source "$1" --force
+}
+
 case "$MODE" in
   create_rm)
     DATA_DIR="${MASTER_MAP_NEW_DIR}"
@@ -188,6 +196,7 @@ case "$MODE" in
     # ---- Stage assets ----
     fs mkdir -p "$DATA_DIR"
     fs cp "${PIPELINE_DIR}/run_generation.sh" "${DATA_DIR}/run_generation.sh"
+    if [ "$MODE" = "real" ]; then describe_dataset "$bag_name"; else describe_dataset ""; fi
     # Hardlink the robot's master reachability map (instant, no extra disk).
     fs ln -f "$local_npz" "${DATA_DIR}/master_ik_data${VOXEL}.npz"
     [ -f "${MASTER_MAP_DIR}/master_ik_data${VOXEL}.h5" ] && \
@@ -240,6 +249,7 @@ case "$MODE" in
     fs mkdir -p "$DATA_DIR"
     fs cp "${PIPELINE_DIR}/run_generation.sh" "${DATA_DIR}/run_generation.sh"
     fs cp "${PIPELINE_DIR}/load_scene.py" "${DATA_DIR}/load_scene.py"
+    describe_dataset "$(basename "$SCENE_FILE")"
     # Hardlink the robot's master reachability map and the scene file (instant, no
     # extra disk -- scenes.h5 can be large and is read-only for the whole array).
     fs ln -f "$local_npz" "${DATA_DIR}/master_ik_data${VOXEL}.npz"

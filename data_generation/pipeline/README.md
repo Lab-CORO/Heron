@@ -190,7 +190,39 @@ workaround needed.
 
 ## Post-processing (after generation)
 
-Raw HDF5 (`group/N/{voxel_grid, reachability_map}`) lands in `datasets/<out>/`.
+Raw HDF5 (`group/N/{voxel_grid, reachability_map}`) lands in `datasets/<out>/`, with a
+`dataset.yaml` manifest (robot, station, mode, voxel size, source).
+
+### Build a Corpus (`heron prepare`)
+
+A Corpus is one or more Datasets made ready for training (see `GLOSSARY.md`). Describe
+it in a recipe (`corpus/example.yaml` shows every key) and run:
+
+```bash
+heron prepare corpus/my_corpus.yaml            # here (small corpora)
+heron prepare corpus/my_corpus.yaml --submit   # as a SLURM CPU job (--account, --time, --mem)
+```
+
+It writes `<data root>/corpora/<name>/{train,val,test/<name>}/` in the pytorch-3dunet
+format (`raw` / `label`) plus `corpus.yaml` (recipe, crop, counts and sources per part).
+Compared with the scripts below:
+
+- the validation part is drawn **by source** (a rosbag, a generated file, a scene), so
+  near-duplicate scenes never end up on both sides;
+- only the train part is augmented, by rotating the **full** scene about the robot base
+  (nearest neighbour, values stay binary), then cropping;
+- the crop comes from the station (`heron stations <name>`), and `origine_*` is updated;
+- Datasets with different voxel sizes are refused unless `resample_to` is set;
+- an existing corpus is never modified (`--force` rebuilds it from scratch).
+
+Datasets generated before manifests existed need one first:
+
+```bash
+heron dataset describe datasets/real_long_test --robot m1013 --station leeloo --mode real --voxel 0.02
+```
+
+The scripts below are superseded by `heron prepare` and will be removed once training
+reads Corpora directly.
 
 ### Crop + format to unet3d (`crop_format.py`)
 
