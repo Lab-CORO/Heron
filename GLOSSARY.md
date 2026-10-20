@@ -35,11 +35,18 @@ _Avoid_: resolution
 **Dataset**:
 A set of Scene / Reachability map pairs generated for one Robot in one Station at one Voxel size.
 
+**Source**:
+What a Dataset's Scenes were captured from: one rosbag, one generated file of random obstacles, or one supplied Scene. Scenes from the same Source are near duplicates.
+
+**Corpus**:
+One or more Datasets made ready for learning: cropped, cut by Source into train, validation and named test parts, with only the train part augmented. An Experiment trains and is evaluated on a Corpus.
+_Avoid_: training set (that is the train part), prepared dataset, formatted data
+
 **Crop**:
 Cutting every Scene and Reachability map of a Dataset to a smaller cube around the base, so it matches the network's input size.
 
 ### Learning
 
 **Experiment**:
-One training run of the network on a Dataset, with its recipe, its checkpoints and its evaluation results.
+One training run of the network on a Corpus, with its recipe, its checkpoints and its evaluation results.
 _Avoid_: run, job (a job is only the cluster submission)
