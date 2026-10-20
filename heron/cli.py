@@ -1,8 +1,12 @@
-"""Command line: `heron robots`, `heron stations`, and `heron shell-env` for the shell pipeline."""
+"""Command line: robots, stations, datasets, corpora, and `shell-env` for the shell pipeline."""
 
 import argparse
 import shlex
+import subprocess
 import sys
+from pathlib import Path
+
+from heron import paths
 
 from heron.errors import HeronConfigError
 from heron.robot import list_robots, load_robot
@@ -60,6 +64,36 @@ def _shell_env(robot_name: str, station_name: str | None, voxel_size: float) -> 
         print(f"{key}={shlex.quote(str(value))}")
 
 
+def _prepare(args) -> None:
+    from heron.corpus import corpus_dir, load_recipe, prepare
+    recipe = load_recipe(args.recipe)
+    if not args.submit:
+        out = prepare(recipe, force=args.force)
+        print(f"corpus written to {out}")
+        return
+    # Same command as a CPU job: preparing a Corpus is hours of CPU work, too much for
+    # a login node and wasted on a GPU allocation.
+    if corpus_dir(recipe.name).exists() and not args.force:
+        from heron.errors import HeronConfigError
+        raise HeronConfigError(f"{corpus_dir(recipe.name)} already exists (use --force to rebuild it from scratch)")
+    log_dir = paths.data_root() / "log" / "output"
+    command = (f"cd {shlex.quote(str(paths.REPO_ROOT))} && PYTHONPATH={shlex.quote(str(paths.REPO_ROOT))} "
+               f"{shlex.quote(sys.executable)} -m heron prepare {shlex.quote(str(recipe.source_file))}"
+               + (" --force" if args.force else ""))
+    sbatch = ["sbatch", f"--job-name=heron_prepare_{recipe.name}",
+              f"--output={log_dir}/heron_prepare_{recipe.name}_%j.txt",
+              f"--time={args.time}", f"--mem={args.mem}", f"--cpus-per-task={args.cpus}"]
+    if args.account:
+        sbatch.append(f"--account={args.account}")
+    sbatch.append(f"--wrap={command}")
+    print("+ " + " ".join(shlex.quote(a) for a in sbatch))
+    if args.dry_run:
+        print("(dry-run: not submitted)")
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(sbatch, check=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="heron")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -78,6 +112,27 @@ def main(argv=None) -> int:
     p.add_argument("--station")
     p.add_argument("--voxel", type=float, required=True)
 
+    p = sub.add_parser("dataset", help="datasets (raw generator output)")
+    dsub = p.add_subparsers(dest="dataset_command", required=True)
+    d = dsub.add_parser("describe", help="write the dataset.yaml manifest of a dataset directory")
+    d.add_argument("path")
+    d.add_argument("--robot", required=True)
+    d.add_argument("--station", required=True)
+    d.add_argument("--mode", required=True, choices=["real", "synthetic", "scene"])
+    d.add_argument("--voxel", type=float, required=True)
+    d.add_argument("--source", default="", help="rosbag or scene file name (real: defaults to the directory name)")
+    d.add_argument("--force", action="store_true", help="overwrite an existing manifest")
+
+    p = sub.add_parser("prepare", help="build a corpus from a recipe file")
+    p.add_argument("recipe")
+    p.add_argument("--force", action="store_true", help="delete and rebuild an existing corpus")
+    p.add_argument("--submit", action="store_true", help="run as a SLURM CPU job instead of here")
+    p.add_argument("--account", help="SLURM account (default: sbatch's)")
+    p.add_argument("--time", default="6:00:00")
+    p.add_argument("--mem", default="32G")
+    p.add_argument("--cpus", type=int, default=1)
+    p.add_argument("--dry-run", action="store_true", help="with --submit: print the sbatch command only")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "robots":
@@ -92,6 +147,13 @@ def main(argv=None) -> int:
                 print("\n".join(list_stations()))
         elif args.command == "shell-env":
             _shell_env(args.robot, args.station, args.voxel)
+        elif args.command == "dataset":
+            from heron.dataset import describe
+            manifest = describe(Path(args.path), args.robot, args.station, args.mode, args.voxel,
+                                source=args.source, force=args.force)
+            print(f"wrote {manifest}")
+        elif args.command == "prepare":
+            _prepare(args)
     except HeronConfigError as exc:
         print(f"heron: {exc}", file=sys.stderr)
         return 2

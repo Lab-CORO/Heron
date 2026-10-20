@@ -1,0 +1,18 @@
+# Example Corpus recipe. Build it with: heron prepare corpus/example.yaml [--submit]
+# Dataset paths are relative to the data root (HERON_DATA_ROOT, default: the
+# directory containing CapaciNet/). Each Dataset needs its dataset.yaml manifest,
+# written by gen_dataset.sh (or `heron dataset describe` for older ones).
+name: example
+datasets:
+  - path: datasets/real_scene_full          # role pool (default): train + val, split by source
+  - path: datasets/real_long_test
+    role: test:reel                         # a whole Dataset kept as a named test part
+crop:
+  size: 128                                 # voxels per side; offset comes from the station
+  # offset: [0.0, 0.0, 0.16]                # meters, overrides the station's crop_offset
+val_ratio: 0.2                              # fraction of the pool's sources held out for validation
+augment: {copies: 5, angle: 180}            # rotations about the base, train part only
+seed: 42
+# drop_empty: true                          # drop all-zero reachability maps (default)
+# min_reachable_frac: 0.005                 # also drop maps with fewer reachable voxels
+# resample_to: 0.02                         # merge Datasets of coarser voxel sizes
