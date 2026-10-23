@@ -94,6 +94,53 @@ def _prepare(args) -> None:
     subprocess.run(sbatch, check=True)
 
 
+def _train(args) -> None:
+    from heron import training
+    if args.resume:
+        experiment = training.find_experiment(args.resume)
+        last = training.prepare_resume(experiment) if not args.dry_run else None
+        print(f"resuming {experiment.name} from {last or 'its last checkpoint'}")
+        if args.dry_run:
+            print("(dry-run: not submitted)")
+            return
+        print(f"submitted job {training.submit(experiment, args.account, kind='resume')}")
+        return
+    if not args.recipe:
+        from heron.errors import HeronConfigError
+        raise HeronConfigError("give a training recipe, or --resume <experiment>")
+    recipe = training.load_training_recipe(args.recipe)
+    sif = Path(args.sif) if args.sif else paths.data_root() / "capa_unet.sif"
+    if not sif.is_file():
+        from heron.errors import HeronConfigError
+        raise HeronConfigError(f"training image not found: {sif} (use --sif)")
+    plan = training.plan(recipe, sif)
+    if args.dry_run:
+        import yaml
+        print(f"# experiment: {plan.experiment}\n# config.yaml")
+        print(yaml.safe_dump(plan.config, sort_keys=False))
+        print("# job.sh")
+        print(plan.job)
+        print("(dry-run: nothing written, not submitted)")
+        return
+    experiment = training.create(plan)
+    print(f"experiment {experiment}")
+    print(f"submitted job {training.submit(experiment, args.account)}")
+
+
+def _experiments(name: str | None) -> None:
+    from heron import training
+    if name:
+        s = training.summary(training.find_experiment(name))
+        for key, value in s.items():
+            print(f"{key:12} {value}")
+        return
+    for experiment in training.list_experiments():
+        s = training.summary(experiment)
+        score = f"{s['best_score']:.4f}" if s["best_score"] is not None else "-"
+        ckpt = s["checkpoints"].get("last", "no checkpoint")
+        print(f"{s['name']:40} corpus={s['corpus']:20} best={score:8} last={ckpt}")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="heron")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -133,6 +180,16 @@ def main(argv=None) -> int:
     p.add_argument("--cpus", type=int, default=1)
     p.add_argument("--dry-run", action="store_true", help="with --submit: print the sbatch command only")
 
+    p = sub.add_parser("train", help="create an experiment from a training recipe and submit it")
+    p.add_argument("recipe", nargs="?")
+    p.add_argument("--resume", metavar="EXPERIMENT", help="continue an experiment from its last checkpoint")
+    p.add_argument("--account", help="SLURM account (default: sbatch's)")
+    p.add_argument("--sif", help="training image (default: <data root>/capa_unet.sif)")
+    p.add_argument("--dry-run", action="store_true", help="print config.yaml and job.sh, write nothing")
+
+    p = sub.add_parser("experiments", help="list experiments, or show one")
+    p.add_argument("name", nargs="?")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "robots":
@@ -154,6 +211,10 @@ def main(argv=None) -> int:
             print(f"wrote {manifest}")
         elif args.command == "prepare":
             _prepare(args)
+        elif args.command == "train":
+            _train(args)
+        elif args.command == "experiments":
+            _experiments(args.name)
     except HeronConfigError as exc:
         print(f"heron: {exc}", file=sys.stderr)
         return 2

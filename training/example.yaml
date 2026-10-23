@@ -1,0 +1,14 @@
+# Example training recipe. Run it with: heron train training/example.yaml [--dry-run]
+# Every key except name and corpus is optional; defaults are the settings of the
+# recent experiments (cbr, f_maps 16, BCEDiceLoss, batch 4, LazyHDF5Dataset).
+name: example
+description: "cbr on the example corpus, fine-tuned from a previous experiment"
+corpus: example                    # a corpus built with `heron prepare`
+model: {layer_order: cbr, f_maps: [16, 32, 64, 128, 256]}
+loss: {name: BCEDiceLoss}          # any loss built into pytorch-3dunet 1.9.1
+optimizer: {learning_rate: 5.0e-5, weight_decay: 1.0e-5}
+loaders: {batch_size: 4, num_workers: 4}
+# patch: 128                       # default: the corpus crop size (one patch per volume)
+# init: {pretrained: cbr_full_20261019_1430, checkpoint: last}   # an experiment name, or a path
+resources: {time: "30:00:00", mem: 64G, cpus: 4, gpus: 1}
+# pytorch3dunet: {trainer: {max_num_epochs: 200}}   # raw pytorch-3dunet keys, merged last
