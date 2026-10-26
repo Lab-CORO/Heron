@@ -59,7 +59,12 @@ submitting or touching the filesystem. `--help` lists all options.
 `--robot` `--station` `--mode {real|synthetic|scene|create_rm}` `--out <name>` `--rosbag <path>`
 `--camera-frame <frame>` `--scene-file <path>` `--scene-h5-path <template>`
 `--scene-occupied-value <int>` `--array <N|a-b>` `--voxel 0.02` `--dataset-size`
-`--batch-size` `--init-batch-size` `--obj-max` `--reach-max` `--time` `--sif`.
+`--batch-size` `--init-batch-size` `--obj-max` `--reach-max` `--time` `--sif` `--account`.
+
+The SLURM account is `--account`, else `slurm.account_gpu` from `site.yaml` (copy
+`site.example.yaml`; it is not versioned, so personal accounts stay out of git), else sbatch's
+default. Generation still runs only through SLURM; `heron generate`, with a local mode, comes
+with the ROS 2 Jazzy image (`docs/images.md`).
 
 ## How it works
 

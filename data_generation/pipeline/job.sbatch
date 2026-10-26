@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=def-jerobg
 #SBATCH --job-name=capa_gen
 #SBATCH --output=log/output/capa_gen_%A_%a.txt
 #SBATCH --error=log/error/capa_gen_%A_%a.txt
@@ -29,7 +28,6 @@
 #                    See pipeline/curobo_patch/README.md.
 
 module load apptainer
-module load hdf5/1.14.2
 
 mkdir -p log/output log/error
 

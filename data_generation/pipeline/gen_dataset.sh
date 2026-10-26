@@ -68,6 +68,7 @@ SIF="${PROJECT_ROOT}/docker_images/data_generation.sif"
 WARP_CACHE="${PROJECT_ROOT}/.cache/warp"
 SCRATCH_BASE="${SCRATCH:-/scratch/${USER}}/rosbag"
 DRY_RUN=0
+ACCOUNT=""   # --account; default: slurm.account_gpu in site.yaml
 
 usage() { awk 'NR>=2 && /^#/ {sub(/^# ?/,""); print; next} NR>=2 {exit}' "${BASH_SOURCE[0]}"; exit "${1:-0}"; }
 
@@ -95,6 +96,7 @@ while [ $# -gt 0 ]; do
     --time)          TIME="$2"; shift 2;;
     --mem)           MEM="$2"; shift 2;;
     --sif)           SIF="$2"; shift 2;;
+    --account)       ACCOUNT="$2"; shift 2;;
     --dry-run)       DRY_RUN=1; shift;;
     -h|--help)       usage 0;;
     *) die "unknown argument: $1 (see --help)";;
@@ -146,7 +148,9 @@ submit() {  # submit <data_dir> <extra_export> <sbatch_opts...>
   local data_dir="$1"; shift
   local extra="$1"; shift
   local export_str="${COMMON_EXPORT},DATA_DIR=${data_dir}${extra:+,${extra}}"
-  local cmd=( sbatch "$@" --export="${export_str}" "${PIPELINE_DIR}/job.sbatch" )
+  # Account: --account, else slurm.account_gpu from site.yaml, else sbatch's default.
+  local account="${ACCOUNT:-${ACCOUNT_GPU}}"
+  local cmd=( sbatch ${account:+--account="$account"} "$@" --export="${export_str}" "${PIPELINE_DIR}/job.sbatch" )
   echo "+ ${cmd[*]}"
   if [ "$DRY_RUN" -eq 1 ]; then echo "(dry-run: not submitted)"; else "${cmd[@]}"; fi
 }

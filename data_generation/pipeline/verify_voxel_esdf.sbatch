@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=def-jerobg
 #SBATCH --job-name=verify_voxel_esdf
 #SBATCH --output=log/output/verify_voxel_esdf_%j.txt
 #SBATCH --error=log/error/verify_voxel_esdf_%j.txt
