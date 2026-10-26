@@ -44,12 +44,13 @@ class Predictor:
 
     def raw_transform(self, raw: np.ndarray):
         # Same as pytorch3dunet.datasets.hdf5.AbstractHDF5Dataset: stats over the whole
-        # volume unless global_normalization is off, then the val 'raw' transformer chain.
+        # volume only if global_normalization is on (heron writes it out; 1.9.6's default is
+        # off), then the val 'raw' transformer chain.
         from pytorch3dunet.augment.transforms import Transformer
         from pytorch3dunet.datasets.utils import calculate_stats
 
         loaders = self.config["loaders"]
-        stats = calculate_stats(raw) if loaders.get("global_normalization", True) else calculate_stats(None, True)
+        stats = calculate_stats(raw) if loaders.get("global_normalization", False) else calculate_stats(None, True)
         return Transformer(loaders["val"]["transformer"], stats).raw_transform()(raw)
 
     def predict(self, raw: np.ndarray) -> np.ndarray:

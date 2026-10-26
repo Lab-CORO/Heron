@@ -2,13 +2,13 @@
 
 `create(recipe)` checks the recipe against its Corpus, writes the Experiment
 directory (<data root>/experiments/<name>_<timestamp>/ with recipe.yaml,
-config.yaml, job.sh, experiment.yaml) and returns it; `submit` sends job.sh to SLURM.
-The training itself is pytorch-3dunet's train3dunet inside the training image.
+config.yaml, job.sh, experiment.yaml) and returns it; `submit` hands job.sh to the
+site's executor (SLURM or local). The training itself is pytorch-3dunet's train3dunet,
+in the site's training runtime: a venv, or the training image.
 """
 
 import copy
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,8 +20,10 @@ from heron import paths
 from heron.config import read_config
 from heron.corpus import MANIFEST as CORPUS_MANIFEST, corpus_dir
 from heron.errors import HeronConfigError
+from heron.execution import Job, render, venv_has
+from heron.site import Site
 
-# Losses built into pytorch-3dunet 1.9.1 (the version in capa_unet.sif).
+# Losses built into pytorch-3dunet 1.9.6 (requirements-train.txt); the same list as 1.9.1.
 BUILTIN_LOSSES = {
     "BCEWithLogitsLoss", "BCEDiceLoss", "CrossEntropyLoss", "WeightedCrossEntropyLoss",
     "GeneralizedDiceLoss", "DiceLoss", "MSELoss", "SmoothL1Loss", "L1Loss", "WeightedSmoothL1Loss",
@@ -39,9 +41,13 @@ DEFAULTS = {
                      "cooldown": 10, "min_lr": 1.0e-8},
     "trainer": {"eval_score_higher_is_better": True, "validate_after_iters": 50, "log_after_iters": 50,
                 "max_num_epochs": 500, "max_num_iterations": 2000000},
+    # global_normalization written out: its default changed from True (1.9.1) to False
+    # (1.9.6); Normalize ignores it, but evaluation reads it too and must not guess.
     "loaders": {"dataset": "LazyHDF5Dataset", "batch_size": 4, "num_workers": 4,
-                "raw_internal_path": "raw", "label_internal_path": "label"},
+                "raw_internal_path": "raw", "label_internal_path": "label", "global_normalization": False},
 }
+# pytorch-3dunet's SliceBuilder asserts height and width >= 64 (1.9.1 and 1.9.6).
+MIN_PATCH = 64
 DEFAULT_RESOURCES = {"time": "30:00:00", "mem": "64G", "cpus": 4, "gpus": 1}
 RECIPE_SECTIONS = {"model", "loss", "optimizer", "lr_scheduler", "trainer", "loaders"}
 TRANSFORMS = {
@@ -148,11 +154,15 @@ def build_config(recipe: TrainingRecipe, corpus: Path, corpus_manifest: dict, ex
     patch = recipe.patch or crop_size
     if patch > crop_size:
         raise HeronConfigError(f"patch {patch} is larger than the corpus crop ({crop_size}³)")
+    if patch < MIN_PATCH:
+        raise HeronConfigError(
+            f"patch {patch} is smaller than {MIN_PATCH}: pytorch-3dunet's SliceBuilder refuses patches under "
+            f"{MIN_PATCH} in height and width (use a corpus crop of at least {MIN_PATCH})")
 
     config = DEFAULTS
     for section, values in recipe.sections.items():
         config = _merge(config, {section: values})
-    _check_batches(corpus_manifest, crop_size, patch, config["loaders"]["batch_size"])
+    _check_parts(corpus_manifest)
     slice_builder = {"name": "SliceBuilder", "patch_shape": [patch] * 3, "stride_shape": [patch] * 3}
     config = _merge(config, {
         "trainer": {"checkpoint_dir": str(experiment / "checkpoint"), "resume": None,
@@ -167,37 +177,28 @@ def build_config(recipe: TrainingRecipe, corpus: Path, corpus_manifest: dict, ex
     return _merge(config, recipe.overrides)
 
 
-def _check_batches(corpus_manifest: dict, crop_size: int, patch: int, batch_size: int) -> None:
-    """pytorch-3dunet 1.9.1 builds both loaders with drop_last=True: a part with fewer
-    patches than batch_size yields no batch at all, and validation silently scores nothing."""
-    patches_per_volume = (crop_size // patch) ** 3
+def _check_parts(corpus_manifest: dict) -> None:
+    """Both parts need samples. (pytorch-3dunet 1.9.1 also dropped incomplete batches,
+    so a part smaller than batch_size validated nothing; 1.9.6 keeps them.)"""
     for part in ("train", "val"):
         counts = corpus_manifest.get("parts", {}).get(part, {})
-        patches = (counts.get("samples", 0) + counts.get("augmented", 0)) * patches_per_volume
-        if patches < batch_size:
-            raise HeronConfigError(
-                f"the corpus {part} part has {patches} patch(es), fewer than batch_size {batch_size}: "
-                f"pytorch-3dunet drops incomplete batches, so {part} would be empty. "
-                f"Add {part} samples or lower loaders.batch_size")
+        if counts.get("samples", 0) + counts.get("augmented", 0) < 1:
+            raise HeronConfigError(f"the corpus {part} part has no samples")
 
 
-def job_script(name: str, experiment: Path, resources: dict, sif: Path, binds: list[Path]) -> str:
-    bind_args = " ".join(f"--bind {shlex.quote(str(b))}" for b in binds)
-    return f"""#!/bin/bash
-#SBATCH --job-name={name}
-#SBATCH --output={experiment}/logs/slurm_%j.out
-#SBATCH --error={experiment}/logs/slurm_%j.err
-#SBATCH --time={resources['time']}
-#SBATCH --mem={resources['mem']}
-#SBATCH --gpus-per-node={resources['gpus']}
-#SBATCH --cpus-per-task={resources['cpus']}
-#SBATCH --export=ALL,DISABLE_DCGM=1
-# Generated by `heron train`. Paths are the same on the host and in the container.
-set -e
-module load apptainer
-apptainer exec -C --nv {bind_args} {shlex.quote(str(sif))} \\
-    train3dunet --config {shlex.quote(str(experiment / 'config.yaml'))}
-"""
+def training_job(name: str, experiment: Path, resources: dict, site: Site, pretrained: Path | None) -> Job:
+    """train3dunet on the Experiment's config, in the site's training runtime."""
+    runtime = site.training_runtime
+    image = None
+    if runtime == "apptainer":
+        image = site.image("training")
+    elif not venv_has(site.venv, "pytorch3dunet"):
+        raise HeronConfigError(
+            f"training runtime is venv but {site.venv} has no pytorch3dunet: "
+            f"pip install -e '.[train]' in that venv (see requirements-train.txt)")
+    return Job(name=name, log_dir=experiment / "logs", log_stem="train",
+               command=f"train3dunet --config {experiment / 'config.yaml'}",
+               runtime=runtime, resources=resources, image=image, binds=tuple(binds(pretrained)))
 
 
 def binds(*paths_needed: Path | None) -> list[Path]:
@@ -230,7 +231,7 @@ class Plan:
     recipe_text: str
 
 
-def plan(recipe: TrainingRecipe, sif: Path, now: datetime | None = None) -> Plan:
+def plan(recipe: TrainingRecipe, site: Site, now: datetime | None = None) -> Plan:
     corpus, corpus_manifest = _corpus(recipe.corpus)
     pretrained = None
     if recipe.pretrained:
@@ -249,12 +250,15 @@ def plan(recipe: TrainingRecipe, sif: Path, now: datetime | None = None) -> Plan
         "corpus_inputs_sha256": corpus_manifest.get("inputs_sha256"),
         "corpus_created": corpus_manifest.get("created"),
         "pretrained": str(pretrained) if pretrained else None,
-        "image": str(sif),
+        "runtime": site.training_runtime,
+        "image": str(site.image("training")) if site.training_runtime == "apptainer" else None,
+        "venv": str(site.venv) if site.training_runtime == "venv" else None,
+        "arch": site.arch,
         "git_commit": _git_commit(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "jobs": [],
     }
-    job = job_script(name, experiment, recipe.resources, sif, binds(pretrained))
+    job = render(training_job(name, experiment, recipe.resources, site, pretrained), site)
     return Plan(experiment, config, job, manifest, recipe.source_file.read_text())
 
 
@@ -271,20 +275,22 @@ def create(p: Plan) -> Path:
     return p.experiment
 
 
-def submit(experiment: Path, account: str | None = None, kind: str = "train", script: str = "job.sh",
-           after: str | None = None) -> str:
-    """sbatch one of the Experiment's job scripts; records the job id in experiment.yaml.
+# Each job script of an Experiment, with the stem of its log files.
+JOB_LOGS = {"job.sh": "train", "job_eval.sh": "eval"}
 
-    after: a job id this one waits for, and only runs if it succeeded (afterok).
+
+def submit(experiment: Path, runner, kind: str = "train", script: str = "job.sh",
+           after: str | None = None) -> str:
+    """Hand one of the Experiment's job scripts to an executor; record the job in experiment.yaml.
+
+    after: a job this one waits for, and only runs if it succeeded.
     """
-    command = (["sbatch"] + ([f"--account={account}"] if account else [])
-               + ([f"--dependency=afterok:{after}"] if after else []) + [str(experiment / script)])
-    out = subprocess.run(command, capture_output=True, text=True, check=True).stdout
-    match = re.search(r"Submitted batch job (\d+)", out)
-    job_id = match.group(1) if match else out.strip()
+    job_id = runner.submit(experiment / script, gpu=True, log_dir=experiment / "logs",
+                           log_stem=JOB_LOGS.get(script, "job"), after=after)
     manifest = read_manifest(experiment)
     manifest.setdefault("jobs", []).append(
-        {"id": job_id, "kind": kind, "submitted": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        {"id": job_id, "kind": kind, "runner": runner.name,
+         "submitted": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     _write_manifest(experiment, manifest)
     return job_id
 
@@ -316,7 +322,7 @@ def summary(experiment: Path) -> dict:
     """What `heron experiments` shows: corpus, jobs, checkpoints and best validation score from the logs."""
     manifest = read_manifest(experiment)
     scores = []
-    for log in sorted((experiment / "logs").glob("slurm_*.out")):
+    for log in sorted((experiment / "logs").glob("*.out")):
         with open(log, errors="replace") as f:
             scores += [float(m.group(1)) for m in _SCORE.finditer(f.read())]
     checkpoints = {}

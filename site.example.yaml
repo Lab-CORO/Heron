@@ -1,0 +1,29 @@
+# Copy to site.yaml (not versioned) and fill in. Every key is optional; without
+# site.yaml heron uses: SLURM, `module load apptainer`, training in
+# <data_root>/capa_unet.sif, data_root = the directory containing CapaciNet/.
+# `heron doctor` checks the result.
+
+scheduler: slurm                # slurm | local (local: jobs run here, in the foreground)
+arch: auto                      # auto (this machine) | amd64 | aarch64; --arch overrides
+
+slurm:                          # personal identifiers: keep them out of git
+  account_gpu: def-xxxxxx_gpu   # generation, training, evaluation, doctor
+  account_cpu: def-xxxxxx_cpu   # heron prepare --submit
+
+modules:                        # `module load` per runtime; [] outside a cluster
+  apptainer: [apptainer]
+  venv: [python/3.11.5]         # the module the venv was created with
+
+data_root: /path/to/heron/data  # datasets/, corpora/, experiments/, log/
+
+training:
+  runtime: venv                 # venv (recommended on Alliance clusters) | apptainer
+  # venv: ~/envs/heron          # default: the venv heron runs from
+
+images:                         # Apptainer images per architecture (docs/images.md)
+  amd64:
+    generation: docker_images/data_generation.sif   # relative to data_root, or absolute
+    training: heron_training.sif                     # only used by the apptainer runtime
+  aarch64:
+    generation: null            # to build: none exists yet
+    training: null

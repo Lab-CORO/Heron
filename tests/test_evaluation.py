@@ -10,6 +10,7 @@ import yaml
 from heron import training
 from heron.cli import main
 from heron.errors import HeronConfigError
+from heron.site import load_site
 from heron.evaluation import jobs, measure
 from heron.evaluation.cache import load_eval_data, save_eval_data
 from heron.evaluation.metrics import (N_CLASSES, confusion_matrix, merge_class_metrics, multiclass_metrics,
@@ -118,7 +119,7 @@ def experiment(tmp_path, monkeypatch):
     (tmp_path / "capa_unet.sif").write_bytes(b"")
     recipe = tmp_path / "cbr.yaml"
     recipe.write_text("name: cbr\ncorpus: full\n")
-    plan = training.plan(training.load_training_recipe(recipe), tmp_path / "capa_unet.sif",
+    plan = training.plan(training.load_training_recipe(recipe), load_site(),
                          now=datetime(2026, 10, 26, 10, 0))
     return training.create(plan)
 
@@ -128,14 +129,14 @@ def test_an_experiment_is_evaluated_on_val_and_every_named_test(experiment):
 
 
 def test_eval_job_measures_inside_the_training_image(experiment):
-    script = jobs.write_eval_job(experiment, checkpoint="last", only=["test:reel"]).read_text()
+    script = jobs.write_eval_job(experiment, load_site(), checkpoint="last", only=["test:reel"]).read_text()
     assert "python -m heron.evaluation.measure" in script
     assert str(experiment / "checkpoint" / "last_checkpoint.pytorch") in script
     assert "--part test:reel=" in script and "--part val=" not in script
     assert f"--results {jobs.results_path(experiment)}" in script
     assert "capa_unet.sif" in script and "eval_env" not in script
     with pytest.raises(HeronConfigError, match="unknown part"):
-        jobs.write_eval_job(experiment, only=["test:nope"])
+        jobs.write_eval_job(experiment, load_site(), only=["test:nope"])
 
 
 def test_train_chains_the_evaluation_after_a_successful_training(tmp_path, monkeypatch, capsys):

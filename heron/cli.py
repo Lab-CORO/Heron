@@ -1,4 +1,4 @@
-"""Command line: robots, stations, datasets, corpora, and `shell-env` for the shell pipeline."""
+"""Command line: robots, stations, datasets, corpora, experiments, doctor, and `shell-env` for the shell pipeline."""
 
 import argparse
 import shlex
@@ -9,6 +9,7 @@ from pathlib import Path
 from heron import paths
 
 from heron.errors import HeronConfigError
+from heron.execution import JobFailed
 from heron.robot import list_robots, load_robot
 from heron.station import check_compatible, list_stations, load_station
 
@@ -42,6 +43,11 @@ def _show_station(name: str, voxel_size: float, crop_size: int) -> None:
         print(f"crop {crop_size}³      impossible: {exc}")
 
 
+def _site_account_gpu() -> str:
+    from heron.site import load_site
+    return load_site().account_gpu or ""
+
+
 def _shell_env(robot_name: str, station_name: str | None, voxel_size: float) -> None:
     """Print KEY='value' lines for gen_dataset.sh to eval."""
     robot = load_robot(robot_name)
@@ -59,9 +65,15 @@ def _shell_env(robot_name: str, station_name: str | None, voxel_size: float) -> 
         "CAMERAS_TEMPLATE": (station.cameras if station else None) or "",
         "DEFAULT_CAMERA_FRAME": station.camera_frame if station else "",
         "SCENE_HALF_EXTENT": station.scene_half_extent if station else "",
+        "ACCOUNT_GPU": _site_account_gpu(),
     }
     for key, value in values.items():
         print(f"{key}={shlex.quote(str(value))}")
+
+
+def _site(args):
+    from heron.site import load_site
+    return load_site(arch=getattr(args, "arch", None), local=getattr(args, "local", False))
 
 
 def _prepare(args) -> None:
@@ -73,29 +85,35 @@ def _prepare(args) -> None:
         return
     # Same command as a CPU job: preparing a Corpus is hours of CPU work, too much for
     # a login node and wasted on a GPU allocation.
+    from heron.execution import Job, executor, render
     if corpus_dir(recipe.name).exists() and not args.force:
-        from heron.errors import HeronConfigError
         raise HeronConfigError(f"{corpus_dir(recipe.name)} already exists (use --force to rebuild it from scratch)")
-    log_dir = paths.data_root() / "log" / "output"
-    command = (f"cd {shlex.quote(str(paths.REPO_ROOT))} && PYTHONPATH={shlex.quote(str(paths.REPO_ROOT))} "
-               f"{shlex.quote(sys.executable)} -m heron prepare {shlex.quote(str(recipe.source_file))}"
-               + (" --force" if args.force else ""))
-    sbatch = ["sbatch", f"--job-name=heron_prepare_{recipe.name}",
-              f"--output={log_dir}/heron_prepare_{recipe.name}_%j.txt",
-              f"--time={args.time}", f"--mem={args.mem}", f"--cpus-per-task={args.cpus}"]
-    if args.account:
-        sbatch.append(f"--account={args.account}")
-    sbatch.append(f"--wrap={command}")
-    print("+ " + " ".join(shlex.quote(a) for a in sbatch))
+    site = _site(args)
+    log_dir = paths.data_root() / "log"
+    job = Job(name=f"heron_prepare_{recipe.name}", log_dir=log_dir, log_stem=f"heron_prepare_{recipe.name}",
+              command=(f"cd {shlex.quote(str(paths.REPO_ROOT))} && {shlex.quote(sys.executable)} -m heron prepare "
+                       f"{shlex.quote(str(recipe.source_file))}" + (" --force" if args.force else "")),
+              runtime="host", resources={"time": args.time, "mem": args.mem, "cpus": args.cpus, "gpus": 0},
+              env={"PYTHONPATH": paths.REPO_ROOT, "HERON_DATA_ROOT": paths.data_root()})
+    script_text = render(job, site)
+    runner = executor(site, args.account)
+    script = log_dir / f"heron_prepare_{recipe.name}.sh"
     if args.dry_run:
-        print("(dry-run: not submitted)")
+        print(script_text)
+        if runner.name == "slurm":
+            print("+ " + " ".join(runner.command(script, gpu=False)))
+        print("(dry-run: nothing written, not submitted)")
         return
     log_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(sbatch, check=True)
+    script.write_text(script_text)
+    print(f"{runner.name} job {runner.submit(script, gpu=False, log_dir=log_dir, log_stem=job.log_stem)}")
 
 
 def _train(args) -> None:
     from heron import training
+    from heron.execution import executor
+    site = _site(args)
+    runner = executor(site, args.account)
     if args.resume:
         experiment = training.find_experiment(args.resume)
         last = training.prepare_resume(experiment) if not args.dry_run else None
@@ -103,17 +121,12 @@ def _train(args) -> None:
         if args.dry_run:
             print("(dry-run: not submitted)")
             return
-        print(f"submitted job {training.submit(experiment, args.account, kind='resume')}")
+        print(f"{runner.name} job {training.submit(experiment, runner, kind='resume')}")
         return
     if not args.recipe:
-        from heron.errors import HeronConfigError
         raise HeronConfigError("give a training recipe, or --resume <experiment>")
     recipe = training.load_training_recipe(args.recipe)
-    sif = Path(args.sif) if args.sif else paths.data_root() / "capa_unet.sif"
-    if not sif.is_file():
-        from heron.errors import HeronConfigError
-        raise HeronConfigError(f"training image not found: {sif} (use --sif)")
-    plan = training.plan(recipe, sif)
+    plan = training.plan(recipe, site)
     if args.dry_run:
         import yaml
         print(f"# experiment: {plan.experiment}\n# config.yaml")
@@ -124,35 +137,52 @@ def _train(args) -> None:
         return
     experiment = training.create(plan)
     print(f"experiment {experiment}")
-    job = training.submit(experiment, args.account)
-    print(f"submitted training job {job}")
     if not args.no_evaluate:
+        # Written before training starts, so a local run evaluates right after it.
         from heron.evaluation.jobs import EVAL_SCRIPT, write_eval_job
-        write_eval_job(experiment, sif=sif)
-        eval_job = training.submit(experiment, args.account, kind="evaluate", script=EVAL_SCRIPT, after=job)
-        print(f"submitted evaluation job {eval_job} (runs if training {job} succeeds)")
+        write_eval_job(experiment, site)
+    job = training.submit(experiment, runner)
+    print(f"{runner.name} training job {job}")
+    if not args.no_evaluate:
+        eval_job = training.submit(experiment, runner, kind="evaluate", script=EVAL_SCRIPT, after=job)
+        print(f"{runner.name} evaluation job {eval_job}" + (f" (runs if training {job} succeeds)"
+                                                           if runner.name == "slurm" else ""))
 
 
 def _evaluate(args) -> None:
     from heron import training
     from heron.evaluation import jobs
+    from heron.execution import executor
     experiment = training.find_experiment(args.experiment)
     if args.figures:
         jobs.draw_figures(experiment)
         return
+    site = _site(args)
     resources = {"time": args.time} if args.time else None
     if args.dry_run:
-        parts = jobs.corpus_parts(experiment)
-        if args.part:
-            parts = {k: v for k, v in parts.items() if k in args.part}
-        sif = Path(args.sif) if args.sif else Path(training.read_manifest(experiment).get("image") or "capa_unet.sif")
-        print(jobs.eval_job_script(experiment, args.checkpoint, parts, sif, resources))
+        print(jobs.eval_job_script(experiment, args.checkpoint, jobs.select_parts(experiment, args.part),
+                                   site, resources))
         print("(dry-run: nothing written, not submitted)")
         return
-    jobs.write_eval_job(experiment, args.checkpoint, args.part, Path(args.sif) if args.sif else None, resources)
-    job = training.submit(experiment, args.account, kind="evaluate", script=jobs.EVAL_SCRIPT)
-    print(f"submitted evaluation job {job}; results will be in {jobs.results_path(experiment)}")
+    jobs.write_eval_job(experiment, site, args.checkpoint, args.part, resources)
+    runner = executor(site, args.account)
+    job = training.submit(experiment, runner, kind="evaluate", script=jobs.EVAL_SCRIPT)
+    print(f"{runner.name} evaluation job {job}; results in {jobs.results_path(experiment)}")
     print(f"then draw the figures with: heron evaluate {experiment.name} --figures")
+
+
+def _doctor(args) -> int:
+    from heron import doctor
+    from heron.execution import executor
+    if args.report:
+        return 0 if doctor.report(Path(args.report), keep=args.keep) else 1
+    site = _site(args)
+    runner = executor(site, args.account)
+    job = doctor.start(site, runner, keep=args.keep)
+    if runner.name == "slurm":
+        print(f"slurm job {job}: the report will be at the end of "
+              f"{paths.data_root() / 'log'}/heron_doctor_{job}.out")
+    return 0
 
 
 def _experiments(name: str | None) -> None:
@@ -167,6 +197,11 @@ def _experiments(name: str | None) -> None:
         score = f"{s['best_score']:.4f}" if s["best_score"] is not None else "-"
         ckpt = s["checkpoints"].get("last", "no checkpoint")
         print(f"{s['name']:40} corpus={s['corpus']:20} best={score:8} last={ckpt}")
+
+
+def _execution_options(p) -> None:
+    p.add_argument("--local", action="store_true", help="run here, in the foreground, instead of with SLURM")
+    p.add_argument("--arch", choices=["amd64", "aarch64"], help="force the image architecture (default: this machine's)")
 
 
 def main(argv=None) -> int:
@@ -201,33 +236,40 @@ def main(argv=None) -> int:
     p = sub.add_parser("prepare", help="build a corpus from a recipe file")
     p.add_argument("recipe")
     p.add_argument("--force", action="store_true", help="delete and rebuild an existing corpus")
-    p.add_argument("--submit", action="store_true", help="run as a SLURM CPU job instead of here")
-    p.add_argument("--account", help="SLURM account (default: sbatch's)")
+    p.add_argument("--submit", action="store_true", help="run as a job (SLURM CPU job, or here with --local)")
+    p.add_argument("--account", help="SLURM account (default: slurm.account_cpu in site.yaml, else sbatch's)")
     p.add_argument("--time", default="6:00:00")
     p.add_argument("--mem", default="32G")
     p.add_argument("--cpus", type=int, default=1)
-    p.add_argument("--dry-run", action="store_true", help="with --submit: print the sbatch command only")
+    p.add_argument("--dry-run", action="store_true", help="with --submit: print the job, write nothing")
+    _execution_options(p)
 
     p = sub.add_parser("train", help="create an experiment from a training recipe and submit it")
     p.add_argument("recipe", nargs="?")
     p.add_argument("--resume", metavar="EXPERIMENT", help="continue an experiment from its last checkpoint")
-    p.add_argument("--account", help="SLURM account (default: sbatch's)")
-    p.add_argument("--sif", help="training image (default: <data root>/capa_unet.sif)")
+    p.add_argument("--account", help="SLURM account (default: slurm.account_gpu in site.yaml, else sbatch's)")
     p.add_argument("--dry-run", action="store_true", help="print config.yaml and job.sh, write nothing")
     p.add_argument("--no-evaluate", action="store_true", help="do not chain the evaluation job after training")
+    _execution_options(p)
 
     p = sub.add_parser("evaluate", help="measure an experiment on its corpus (val and test parts)")
     p.add_argument("experiment")
     p.add_argument("--part", action="append", help="only this part (val, test:<name>); repeatable")
     p.add_argument("--checkpoint", default="best", choices=["best", "last"])
-    p.add_argument("--account", help="SLURM account (default: sbatch's)")
+    p.add_argument("--account", help="SLURM account (default: slurm.account_gpu in site.yaml, else sbatch's)")
     p.add_argument("--time", help="job time limit (default 2:00:00)")
-    p.add_argument("--sif", help="training image (default: the one the experiment trained with)")
     p.add_argument("--dry-run", action="store_true", help="print the job, write nothing")
+    _execution_options(p)
     p.add_argument("--figures", action="store_true", help="draw the figures of a finished measurement, here")
 
     p = sub.add_parser("experiments", help="list experiments, or show one")
     p.add_argument("name", nargs="?")
+
+    p = sub.add_parser("doctor", help="run a tiny pipeline end to end on this site and report what works")
+    p.add_argument("--account", help="SLURM account (default: slurm.account_gpu in site.yaml, else sbatch's)")
+    p.add_argument("--keep", action="store_true", help="keep the run's files instead of deleting them")
+    p.add_argument("--report", metavar="DIR", help=argparse.SUPPRESS)
+    _execution_options(p)
 
     args = parser.parse_args(argv)
     try:
@@ -256,9 +298,14 @@ def main(argv=None) -> int:
             _evaluate(args)
         elif args.command == "experiments":
             _experiments(args.name)
+        elif args.command == "doctor":
+            return _doctor(args)
     except HeronConfigError as exc:
         print(f"heron: {exc}", file=sys.stderr)
         return 2
+    except JobFailed as exc:
+        print(f"heron: job failed: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

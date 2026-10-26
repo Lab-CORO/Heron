@@ -14,6 +14,10 @@ _Avoid_: arm config, robot env
 A physical installation where a Robot works: its fixed obstacles, its cameras and the region around the base that a Scene covers. One Robot can work in several Stations.
 _Avoid_: setup, cell, world (when meaning the whole installation)
 
+**Site**:
+A machine or cluster Heron runs on, with what differs between them: how jobs are launched, the accounts, the modules, the environments and images, where the data lives.
+_Avoid_: platform, system, cluster (a cluster is one kind of Site)
+
 ### Data
 
 **Master map**:

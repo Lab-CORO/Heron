@@ -73,3 +73,6 @@ data_generation/data/*
 # Python tooling
 .pytest_cache/
 *.egg-info/
+
+# Site settings (personal accounts and paths)
+site.yaml

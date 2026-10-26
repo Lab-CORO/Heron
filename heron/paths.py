@@ -9,12 +9,15 @@ STATIONS_DIR = REPO_ROOT / "stations"
 
 
 def data_root() -> Path:
-    """Directory holding generated data (master maps, datasets).
+    """Directory holding generated data (master maps, datasets, corpora, experiments).
 
-    HERON_DATA_ROOT overrides it; by default it is the directory that contains
-    the repository, which is where the cluster layout already keeps its data.
+    HERON_DATA_ROOT first, then data_root in site.yaml; by default the directory that
+    contains the repository, which is where the cluster layout already keeps its data.
     """
-    return Path(os.environ.get("HERON_DATA_ROOT", REPO_ROOT.parent)).resolve()
+    if "HERON_DATA_ROOT" in os.environ:
+        return Path(os.environ["HERON_DATA_ROOT"]).resolve()
+    from heron.site import configured_data_root
+    return (configured_data_root() or REPO_ROOT.parent).resolve()
 
 
 def voxel_tag(voxel_size: float) -> str:
