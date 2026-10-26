@@ -1,7 +1,14 @@
 # Training and evaluation
 
-Training runs pytorch-3dunet 1.9.1 (`train3dunet`) inside `capa_unet.sif`, on a Corpus
+Training runs pytorch-3dunet 1.9.6 (`train3dunet`), on a Corpus
 built with `heron prepare` (see `data_generation/pipeline/README.md` and `GLOSSARY.md`).
+
+## Where it runs
+
+Jobs go through SLURM, or run here in the foreground with `--local` (on a node with a GPU).
+Training and evaluation run in a Python venv or in an Apptainer image, as `site.yaml` says
+(copy `site.example.yaml`; personal accounts stay out of git). `docs/images.md` lists what the
+environment must provide, and `heron doctor` checks it end to end on a tiny pipeline.
 
 ## Train
 
@@ -13,10 +20,9 @@ heron train training/my_run.yaml               # create the experiment and submi
 heron train --resume my_run_20261023_1430      # continue it from its last checkpoint
 ```
 
-`heron train` checks the recipe before submitting: the corpus exists with train and val
-parts, each part holds at least one full batch (pytorch-3dunet drops incomplete batches,
-so a smaller val part would validate nothing), the loss is built into pytorch-3dunet,
-and the patch fits in the corpus crop (by default the patch is the crop size).
+`heron train` checks the recipe before submitting: the corpus exists with samples in its
+train and val parts, the loss is built into pytorch-3dunet, and the patch fits in the corpus
+crop and is at least 64 (pytorch-3dunet's minimum; by default the patch is the crop size).
 
 Each Experiment gets `<data root>/experiments/<name>_<YYYYmmdd_HHMM>/`:
 
@@ -42,8 +48,9 @@ heron evaluate my_run_20261023_1430 --part test:reel --checkpoint last
 heron evaluate my_run_20261023_1430 --figures             # after the job: draw the figures here
 ```
 
-The measurement runs inside `capa_unet.sif`, so the model is evaluated by the same
-pytorch-3dunet that trained it, with the val transform of its own `config.yaml`. For each
+The measurement runs in the environment the experiment trained in (recorded in its
+`experiment.yaml`), so the model is evaluated by the same pytorch-3dunet that trained it,
+with the val transform of its own `config.yaml`. For each
 part it writes `evaluation/<part>/` (`report.txt`, `eval_data.h5`) in the experiment, and
 `results/<experiment>.yaml` in this repository: recipe, corpus fingerprint, checkpoint and
 every part's metrics. Commit that file to keep the results. `--figures` draws, on the host
