@@ -7,7 +7,7 @@ name = "heron"
 version = "0.1.0"
 description = "Reachability datasets and 3D U-Net training for robot workspaces"
 requires-python = ">=3.10"
-dependencies = ["pyyaml>=6", "numpy", "scipy", "h5py"]
+dependencies = ["pyyaml>=6", "numpy", "scipy", "h5py", "matplotlib"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

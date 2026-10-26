@@ -200,7 +200,7 @@ apptainer exec -C --nv {bind_args} {shlex.quote(str(sif))} \\
 """
 
 
-def _binds(*paths_needed: Path | None) -> list[Path]:
+def binds(*paths_needed: Path | None) -> list[Path]:
     """Directories to mount: the repository and data root, plus anything outside them."""
     roots = [paths.REPO_ROOT, paths.data_root()]
     for p in paths_needed:
@@ -249,11 +249,12 @@ def plan(recipe: TrainingRecipe, sif: Path, now: datetime | None = None) -> Plan
         "corpus_inputs_sha256": corpus_manifest.get("inputs_sha256"),
         "corpus_created": corpus_manifest.get("created"),
         "pretrained": str(pretrained) if pretrained else None,
+        "image": str(sif),
         "git_commit": _git_commit(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "jobs": [],
     }
-    job = job_script(name, experiment, recipe.resources, sif, _binds(pretrained))
+    job = job_script(name, experiment, recipe.resources, sif, binds(pretrained))
     return Plan(experiment, config, job, manifest, recipe.source_file.read_text())
 
 
@@ -270,9 +271,14 @@ def create(p: Plan) -> Path:
     return p.experiment
 
 
-def submit(experiment: Path, account: str | None = None, kind: str = "train") -> str:
-    """sbatch job.sh; records the job id in experiment.yaml and returns it."""
-    command = ["sbatch"] + ([f"--account={account}"] if account else []) + [str(experiment / "job.sh")]
+def submit(experiment: Path, account: str | None = None, kind: str = "train", script: str = "job.sh",
+           after: str | None = None) -> str:
+    """sbatch one of the Experiment's job scripts; records the job id in experiment.yaml.
+
+    after: a job id this one waits for, and only runs if it succeeded (afterok).
+    """
+    command = (["sbatch"] + ([f"--account={account}"] if account else [])
+               + ([f"--dependency=afterok:{after}"] if after else []) + [str(experiment / script)])
     out = subprocess.run(command, capture_output=True, text=True, check=True).stdout
     match = re.search(r"Submitted batch job (\d+)", out)
     job_id = match.group(1) if match else out.strip()

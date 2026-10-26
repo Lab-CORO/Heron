@@ -124,7 +124,35 @@ def _train(args) -> None:
         return
     experiment = training.create(plan)
     print(f"experiment {experiment}")
-    print(f"submitted job {training.submit(experiment, args.account)}")
+    job = training.submit(experiment, args.account)
+    print(f"submitted training job {job}")
+    if not args.no_evaluate:
+        from heron.evaluation.jobs import EVAL_SCRIPT, write_eval_job
+        write_eval_job(experiment, sif=sif)
+        eval_job = training.submit(experiment, args.account, kind="evaluate", script=EVAL_SCRIPT, after=job)
+        print(f"submitted evaluation job {eval_job} (runs if training {job} succeeds)")
+
+
+def _evaluate(args) -> None:
+    from heron import training
+    from heron.evaluation import jobs
+    experiment = training.find_experiment(args.experiment)
+    if args.figures:
+        jobs.draw_figures(experiment)
+        return
+    resources = {"time": args.time} if args.time else None
+    if args.dry_run:
+        parts = jobs.corpus_parts(experiment)
+        if args.part:
+            parts = {k: v for k, v in parts.items() if k in args.part}
+        sif = Path(args.sif) if args.sif else Path(training.read_manifest(experiment).get("image") or "capa_unet.sif")
+        print(jobs.eval_job_script(experiment, args.checkpoint, parts, sif, resources))
+        print("(dry-run: nothing written, not submitted)")
+        return
+    jobs.write_eval_job(experiment, args.checkpoint, args.part, Path(args.sif) if args.sif else None, resources)
+    job = training.submit(experiment, args.account, kind="evaluate", script=jobs.EVAL_SCRIPT)
+    print(f"submitted evaluation job {job}; results will be in {jobs.results_path(experiment)}")
+    print(f"then draw the figures with: heron evaluate {experiment.name} --figures")
 
 
 def _experiments(name: str | None) -> None:
@@ -186,6 +214,17 @@ def main(argv=None) -> int:
     p.add_argument("--account", help="SLURM account (default: sbatch's)")
     p.add_argument("--sif", help="training image (default: <data root>/capa_unet.sif)")
     p.add_argument("--dry-run", action="store_true", help="print config.yaml and job.sh, write nothing")
+    p.add_argument("--no-evaluate", action="store_true", help="do not chain the evaluation job after training")
+
+    p = sub.add_parser("evaluate", help="measure an experiment on its corpus (val and test parts)")
+    p.add_argument("experiment")
+    p.add_argument("--part", action="append", help="only this part (val, test:<name>); repeatable")
+    p.add_argument("--checkpoint", default="best", choices=["best", "last"])
+    p.add_argument("--account", help="SLURM account (default: sbatch's)")
+    p.add_argument("--time", help="job time limit (default 2:00:00)")
+    p.add_argument("--sif", help="training image (default: the one the experiment trained with)")
+    p.add_argument("--dry-run", action="store_true", help="print the job, write nothing")
+    p.add_argument("--figures", action="store_true", help="draw the figures of a finished measurement, here")
 
     p = sub.add_parser("experiments", help="list experiments, or show one")
     p.add_argument("name", nargs="?")
@@ -213,6 +252,8 @@ def main(argv=None) -> int:
             _prepare(args)
         elif args.command == "train":
             _train(args)
+        elif args.command == "evaluate":
+            _evaluate(args)
         elif args.command == "experiments":
             _experiments(args.name)
     except HeronConfigError as exc:

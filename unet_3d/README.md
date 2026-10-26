@@ -31,6 +31,28 @@ Each Experiment gets `<data root>/experiments/<name>_<YYYYmmdd_HHMM>/`:
 
 Keep recipes in `training/` under git; the experiment directories stay in the data root.
 
+## Evaluate
+
+`heron train` also submits the evaluation, to run once training succeeds. Otherwise
+(training stopped at its time limit, a resumed run, another checkpoint):
+
+```bash
+heron evaluate my_run_20261023_1430                       # best checkpoint, val and every test part
+heron evaluate my_run_20261023_1430 --part test:reel --checkpoint last
+heron evaluate my_run_20261023_1430 --figures             # after the job: draw the figures here
+```
+
+The measurement runs inside `capa_unet.sif`, so the model is evaluated by the same
+pytorch-3dunet that trained it, with the val transform of its own `config.yaml`. For each
+part it writes `evaluation/<part>/` (`report.txt`, `eval_data.h5`) in the experiment, and
+`results/<experiment>.yaml` in this repository: recipe, corpus fingerprint, checkpoint and
+every part's metrics. Commit that file to keep the results. `--figures` draws, on the host
+(matplotlib), `confusion_matrix.png`, `error_histogram.png`, `tolerance_curve.png` and
+`regions_<n>.png` from `eval_data.h5`.
+
+The metrics are those of the former `script/evaluate.py`, unchanged: on the same checkpoint
+and volumes both give identical reports.
+
 ## Follow experiments
 
 ```bash
@@ -44,6 +66,7 @@ The best score is read from the SLURM logs (`Evaluation score:` lines).
 ## Older tools
 
 `script/launch_training.py` (interactive launcher), `run_training.sh`,
-`script/format_data.py` and `custom/losses.py` are superseded by `heron prepare` /
+`script/format_data.py`, `script/evaluate.py`, `script/eval_job.sh` and `custom/losses.py`
+are superseded by `heron prepare` /
 `heron train` and will be removed. The experiments under `experiments/` and `archive/`
 were made with them; their `config.yaml` use `/workspace/...` container paths.
