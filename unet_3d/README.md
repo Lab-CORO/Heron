@@ -60,6 +60,52 @@ every part's metrics. Commit that file to keep the results. `--figures` draws, o
 The metrics are those of the former `script/evaluate.py`, unchanged: on the same checkpoint
 and volumes both give identical reports.
 
+## TensorRT: inference time per precision
+
+How fast the network runs once compiled by TensorRT in fp32, fp16 or int8, against PyTorch
+fp32 on the same GPU. Inference time does not depend on the content of a volume, so the
+timing uses 1000 random binary volumes (after 50 warmup ones) and reports, per run, the
+median, p95 and throughput of two measures:
+- **inference**: the network alone, its input already on the GPU;
+- **end_to_end**: from a numpy volume to a numpy prediction, including the val transform
+  and the copies.
+
+The environment needs TensorRT 10.16 (`requirements-trt.txt`; see `docs/images.md`).
+
+**On the cluster, with quality.** `--precision` adds the TensorRT engines to the evaluation:
+
+```bash
+heron evaluate my_run_20261023_1430 --precision fp32 fp16 int8
+```
+
+For each engine, the evaluation measures every part as for PyTorch, under
+`evaluation/tensorrt_<precision>/<part>/`. `results/<experiment>.yaml` gains `timing`
+(every run on this GPU) and `tensorrt` (each engine's metrics, and their `delta` from
+PyTorch's).
+
+**On any machine, time only.** First, package the Experiment on the cluster:
+
+```bash
+heron export my_run_20261023_1430         # -> <experiment>/package/
+```
+
+The package holds the config, the checkpoint, `model.onnx` (fp32, at the Corpus crop
+size) and 200 train volumes for int8 calibration. Copy the package directory to the
+other machine (a Jetson, a workstation), then:
+
+```bash
+heron benchmark /path/to/package --local                   # fp32 fp16 int8, 1000 volumes
+heron benchmark my_run_20261023_1430 --precision fp16      # on the cluster: through SLURM
+```
+
+Each machine builds its own engines on first use, which takes minutes, longer on a Jetson.
+It keeps them in `<package>/engines/`, one per GPU, TensorRT version and precision; never
+copy or commit them. The results go to `results/<experiment>/benchmark_<gpu>.yaml`, tagged
+with the GPU, CUDA, TensorRT and torch versions (and the L4T release on a Jetson).
+
+Both PyTorch and the engines run with TF32 off, so fp32 really means fp32. int8 uses
+TensorRT's implicit calibration, which TensorRT 11 removed: heron refuses int8 under 11.
+
 ## Follow experiments
 
 ```bash

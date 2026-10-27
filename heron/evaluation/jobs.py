@@ -51,12 +51,15 @@ def training_site(experiment: Path, site: Site) -> Site:
 
 
 def eval_job(experiment: Path, checkpoint: str, parts: dict[str, Path], site: Site,
-             resources: dict | None = None) -> Job:
+             resources: dict | None = None, precisions: list[str] = (), samples: int | None = None) -> Job:
+    """precisions: also time and measure these TensorRT engines (heron.evaluation.measure)."""
     ckpt = experiment / "checkpoint" / f"{checkpoint}_checkpoint.pytorch"
     part_args = " ".join(f"--part {shlex.quote(f'{name}={d}')}" for name, d in parts.items())
     command = (f"python -m heron.evaluation.measure --experiment {shlex.quote(str(experiment))} "
                f"--checkpoint {shlex.quote(str(ckpt))} {part_args} "
-               f"--results {shlex.quote(str(results_path(experiment)))}")
+               f"--results {shlex.quote(str(results_path(experiment)))}"
+               + (f" --precision {' '.join(precisions)}" if precisions else "")
+               + (f" --samples {samples}" if samples else ""))
     runtime = site.training_runtime
     return Job(name=f"eval_{experiment.name}", log_dir=experiment / "logs", log_stem="eval",
                command=command, runtime=runtime, resources=dict(EVAL_RESOURCES, **(resources or {})),
@@ -65,9 +68,9 @@ def eval_job(experiment: Path, checkpoint: str, parts: dict[str, Path], site: Si
 
 
 def eval_job_script(experiment: Path, checkpoint: str, parts: dict[str, Path], site: Site,
-                    resources: dict | None = None) -> str:
+                    resources: dict | None = None, precisions: list[str] = (), samples: int | None = None) -> str:
     site = training_site(experiment, site)
-    return render(eval_job(experiment, checkpoint, parts, site, resources), site)
+    return render(eval_job(experiment, checkpoint, parts, site, resources, precisions, samples), site)
 
 
 def select_parts(experiment: Path, only: list[str] | None = None) -> dict[str, Path]:
@@ -81,23 +84,25 @@ def select_parts(experiment: Path, only: list[str] | None = None) -> dict[str, P
 
 
 def write_eval_job(experiment: Path, site: Site, checkpoint: str = "best", only: list[str] | None = None,
-                   resources: dict | None = None) -> Path:
+                   resources: dict | None = None, precisions: list[str] = (), samples: int | None = None) -> Path:
     if checkpoint not in ("best", "last"):
         raise HeronConfigError("checkpoint must be best or last")
     script = experiment / EVAL_SCRIPT
-    script.write_text(eval_job_script(experiment, checkpoint, select_parts(experiment, only), site, resources))
+    script.write_text(eval_job_script(experiment, checkpoint, select_parts(experiment, only), site, resources,
+                                      precisions, samples))
     script.chmod(0o755)
     return script
 
 
 def draw_figures(experiment: Path, log=print) -> list[Path]:
-    """Figures of every measured part, from its eval_data.h5 (host side, needs matplotlib)."""
+    """Figures of every measured part, from its eval_data.h5 (host side, needs matplotlib).
+    The PyTorch model's under evaluation/<part>/, each TensorRT engine's under evaluation/tensorrt_*/<part>/."""
     from heron.evaluation import figures
     from heron.evaluation.cache import EVAL_DATA_FILENAME, load_eval_data
     from heron.evaluation.metrics import REGION_NAMES, merge_class_metrics
 
     drawn = []
-    for cache in sorted((experiment / "evaluation").glob(f"*/{EVAL_DATA_FILENAME}")):
+    for cache in sorted((experiment / "evaluation").glob(f"**/{EVAL_DATA_FILENAME}")):
         out, d = cache.parent, load_eval_data(cache)
         global_n = int(d["global_cm"].sum())
         region_n = {r: int(d["region_cm"][r].sum()) for r in REGION_NAMES}

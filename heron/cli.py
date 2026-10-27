@@ -1,4 +1,5 @@
-"""Command line: robots, stations, datasets, corpora, experiments, doctor, and `shell-env` for the shell pipeline."""
+"""Command line: robots, stations, datasets, corpora, experiments, TensorRT packages and benchmarks, doctor,
+and `shell-env` for the shell pipeline."""
 
 import argparse
 import shlex
@@ -161,14 +162,43 @@ def _evaluate(args) -> None:
     resources = {"time": args.time} if args.time else None
     if args.dry_run:
         print(jobs.eval_job_script(experiment, args.checkpoint, jobs.select_parts(experiment, args.part),
-                                   site, resources))
+                                   site, resources, args.precision, args.samples))
         print("(dry-run: nothing written, not submitted)")
         return
-    jobs.write_eval_job(experiment, site, args.checkpoint, args.part, resources)
+    jobs.write_eval_job(experiment, site, args.checkpoint, args.part, resources, args.precision, args.samples)
     runner = executor(site, args.account)
     job = training.submit(experiment, runner, kind="evaluate", script=jobs.EVAL_SCRIPT)
     print(f"{runner.name} evaluation job {job}; results in {jobs.results_path(experiment)}")
     print(f"then draw the figures with: heron evaluate {experiment.name} --figures")
+
+
+def _export(args) -> None:
+    from heron import training
+    from heron.inference.package import export
+    experiment = training.find_experiment(args.experiment)
+    out = export(experiment, Path(args.out) if args.out else None, args.checkpoint,
+                 Path(args.calibration) if args.calibration else None, args.calibration_volumes, args.force)
+    print(f"package {out}")
+    print(f"time it on this machine's GPU with: heron benchmark {out} --precision fp32 fp16 int8")
+
+
+def _benchmark(args) -> None:
+    from heron.execution import executor
+    from heron.inference import jobs
+    from heron.inference.package import find_package, load
+    package = find_package(args.package)
+    site = _site(args)
+    options = dict(samples=args.samples, warmup=args.warmup, rebuild=args.rebuild,
+                   resources={"time": args.time} if args.time else None)
+    if args.dry_run:
+        from heron.execution import render
+        print(render(jobs.benchmark_job(package, args.precision, site, **options), site))
+        print("(dry-run: nothing written, not submitted)")
+        return
+    script = jobs.write_benchmark_job(package, args.precision, site, **options)
+    runner = executor(site, args.account)
+    job = runner.submit(script, gpu=True, log_dir=package / "logs", log_stem="benchmark")
+    print(f"{runner.name} benchmark job {job}; results in {jobs.results_dir(load(package)['experiment'])}/")
 
 
 def _doctor(args) -> int:
@@ -261,6 +291,30 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true", help="print the job, write nothing")
     _execution_options(p)
     p.add_argument("--figures", action="store_true", help="draw the figures of a finished measurement, here")
+    p.add_argument("--precision", nargs="+", default=[], choices=["fp32", "fp16", "int8"],
+                   help="also time and measure these TensorRT engines against PyTorch (exports the package if needed)")
+    p.add_argument("--samples", type=int, help="with --precision: volumes timed per run (default 1000)")
+
+    p = sub.add_parser("export", help="package an experiment for inference elsewhere: checkpoint, ONNX, int8 sample")
+    p.add_argument("experiment")
+    p.add_argument("--checkpoint", default="best", choices=["best", "last"])
+    p.add_argument("--out", help="package directory (default: <experiment>/package)")
+    p.add_argument("--calibration", metavar="DIR",
+                   help="train volumes for int8 calibration (default: the corpus's train part)")
+    p.add_argument("--calibration-volumes", type=int, default=200, help="how many of them to package (default 200)")
+    p.add_argument("--force", action="store_true", help="replace an existing package, engines included")
+
+    p = sub.add_parser("benchmark", help="time a package on a GPU: PyTorch fp32, then TensorRT engines")
+    p.add_argument("package", help="package directory, or an experiment (its package)")
+    p.add_argument("--precision", nargs="+", default=["fp32", "fp16", "int8"], choices=["fp32", "fp16", "int8"],
+                   help="TensorRT precisions to build and time (default: all three)")
+    p.add_argument("--samples", type=int, default=1000, help="volumes timed per run (default 1000)")
+    p.add_argument("--warmup", type=int, default=50, help="volumes run before timing (default 50)")
+    p.add_argument("--rebuild", action="store_true", help="build the engines again even if cached")
+    p.add_argument("--account", help="SLURM account (default: slurm.account_gpu in site.yaml, else sbatch's)")
+    p.add_argument("--time", help="job time limit (default 2:00:00)")
+    p.add_argument("--dry-run", action="store_true", help="print the job, write nothing")
+    _execution_options(p)
 
     p = sub.add_parser("experiments", help="list experiments, or show one")
     p.add_argument("name", nargs="?")
@@ -296,6 +350,10 @@ def main(argv=None) -> int:
             _train(args)
         elif args.command == "evaluate":
             _evaluate(args)
+        elif args.command == "export":
+            _export(args)
+        elif args.command == "benchmark":
+            _benchmark(args)
         elif args.command == "experiments":
             _experiments(args.name)
         elif args.command == "doctor":

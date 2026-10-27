@@ -54,3 +54,11 @@ Cutting every Scene and Reachability map of a Dataset to a smaller cube around t
 **Experiment**:
 One training run of the network on a Corpus, with its recipe, its checkpoints and its evaluation results.
 _Avoid_: run, job (a job is only the cluster submission)
+
+**Package**:
+An Experiment made portable for inference on another machine: its config, one checkpoint, the network as ONNX, and a sample of its train volumes for int8 calibration.
+_Avoid_: export (that is the command), bundle, model (the network alone)
+
+**Engine**:
+The network compiled by TensorRT at one precision (fp32, fp16, int8), for one GPU and one TensorRT version. Built from a Package on the machine that runs it.
+_Avoid_: TRT model, plan

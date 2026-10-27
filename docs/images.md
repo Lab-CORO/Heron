@@ -45,6 +45,23 @@ the Alliance wheels, pytorch3dunet only from PyPI). An image is built from
 `images/training/Dockerfile`, which installs the same file. Matplotlib is only needed where
 `heron evaluate --figures` runs, on the host.
 
+## TensorRT (export, benchmark, evaluate --precision)
+
+On top of the training environment, `requirements-trt.txt`: **TensorRT 10.16**, the version
+of JetPack 7.2 on the Jetson Orin, so both machines build engines with the same optimizer.
+Not TensorRT 11: it removed the implicit int8 calibration heron uses.
+
+- **Cluster venv**: `pip install -e '.[trt]'` (TensorRT, plus onnx and onnxscript for `heron export`).
+  Alliance's pip refuses manylinux wheels, and NVIDIA publishes the TensorRT Python bindings
+  only in that form. So install that one wheel by hand first, as `requirements-trt.txt`
+  shows. Alliance's `tensorrt/8.6.1.6` module is too old.
+- **Jetson (JetPack 7.2)**: TensorRT and torch come with JetPack. Use a venv that sees them:
+  `python3 -m venv --system-site-packages ~/envs/heron`, then `pip install -e '.[train]'`
+  (pytorch3dunet, for the PyTorch baseline and the val transform). The Jetson needs neither
+  onnx nor the `[trt]` extra, since the package already holds `model.onnx`. In `site.yaml`:
+  `arch: aarch64`, `scheduler: local`, `training: {runtime: venv, venv: ~/envs/heron}`.
+- **Apptainer**: the current training image has no TensorRT. Benchmark from a venv.
+
 ## Generation image
 
 Dataset generation needs ROS 2 and cuRobo, so it always runs in an Apptainer image,
