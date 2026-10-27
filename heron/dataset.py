@@ -49,7 +49,7 @@ class Dataset:
 
         real: every file replays the same rosbag, so the whole Dataset is one source.
         synthetic: each file is its own run of random obstacles.
-        scene: files are named scene_<i>_task<n>.h5; scene <i> is the source.
+        scene: files are named scene_<i>_task<n>_job<id>.h5; scene <i> is the source.
         """
         if self.mode == "real":
             return f"{self.name}/{self.source}"

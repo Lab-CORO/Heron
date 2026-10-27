@@ -125,17 +125,19 @@ STATUS=$?
 # Collect the task's output and drop its private directory. Every .h5 here belongs to
 # this task (it owned the whole directory), so unlike the old `ls -t | head -1` over a
 # shared dir this cannot pick up another task's file. Scene mode gets a name keyed on
-# the scene it processed; the other modes keep generate_data's timestamp name with the
-# task id appended, which is enough to make it unique.
+# the scene it processed; the other modes keep generate_data's timestamp name. Both get
+# _task<N>_job<id> appended: tasks of an array start together and generate_data's timestamp
+# only has second resolution, so the name alone is not unique.
 if [ -n "${TASK_DIR:-}" ]; then
   n_out=0
+  tag="task${TASK_ID}_job${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local}}"
   for out in "${TASK_DIR}"/*.h5; do
     [ -e "${out}" ] || continue
     case "$(basename "${out}")" in master_ik_data*) continue;; esac
     if [ "${MODE}" = "scene" ]; then
-      dest="${DATA_DIR}/scene_${SCENE_INDEX}_task${TASK_ID}.h5"
+      dest="${DATA_DIR}/scene_${SCENE_INDEX}_${tag}.h5"
     else
-      dest="${DATA_DIR}/$(basename "${out}" .h5)_task${TASK_ID}.h5"
+      dest="${DATA_DIR}/$(basename "${out}" .h5)_${tag}.h5"
     fi
     [ "${n_out}" -gt 0 ] && dest="${dest%.h5}_${n_out}.h5"
     mv "${out}" "${dest}"
