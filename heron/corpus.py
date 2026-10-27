@@ -127,6 +127,11 @@ def prepare(recipe: Recipe, force: bool = False, log=print) -> Path:
     inputs_sha256 = _inputs_hash(datasets)
     skipped = []
     parts = _assign_parts(recipe, datasets, lambda p, e: skipped.append(f"{p}: {e}"))
+    if not any(parts.values()):
+        raise HeronConfigError(
+            f"recipe {recipe.name}: no scenes in " + ", ".join(str(d.path) for d, _ in datasets)
+            + " (generator .h5 files expected there; generation writes them there only when its job "
+              "finishes)" + "".join(f"\n  skipped {line}" for line in skipped))
 
     partial = out.with_name(out.name + ".partial")
     shutil.rmtree(partial, ignore_errors=True)

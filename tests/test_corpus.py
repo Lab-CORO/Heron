@@ -191,3 +191,10 @@ def test_submit_dry_run_prints_a_cpu_job(root, capsys):
                  "--account", "def-test"]) == 0
     out = capsys.readouterr().out
     assert "--account=def-test" in out and "-m heron prepare" in out and "gpu" not in out
+
+
+def test_a_dataset_without_scenes_says_so_and_builds_nothing(root):
+    make_dataset(root, "empty", "synthetic", {})
+    with pytest.raises(HeronConfigError, match="no scenes in"):
+        prepare(load_recipe(recipe(root, datasets=["datasets/empty"])), log=lambda *_: None)
+    assert not (root / "corpora").exists() or not any((root / "corpora").iterdir())
