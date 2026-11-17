@@ -1,172 +1,112 @@
-# CapaciNet – 3D‑U‑Net for Robot Reachability Maps
+# Heron
 
-> **Branch:** `vae_test/unet_3d`
+Heron predicts, for a robot in a cluttered workspace, which points it can reach. It generates
+reachability datasets for a robot and a station, then trains and evaluates a 3D U-Net on them,
+and measures how fast the network runs once compiled with TensorRT.
 
-CapaciNet provides a complete pipeline for generating robot **R**eachability **M**aps (RMs), formatting them as voxel grids, and training a 3‑D‑U‑Net to predict reachability in unseen environments. The code is written for **ROS 2 Humble** and **Python 3.10**. A CUDA‑enabled GPU is strongly recommended for training.
+The repository is still named `CapaciNet` (the project's first name); the Python package and
+the command line are `heron`. The terms used everywhere below (Robot, Station, Dataset, Source,
+Corpus, Experiment, Package, Engine…) are defined in [GLOSSARY.md](GLOSSARY.md).
 
----
+## Pipeline
 
-## 📦 Project layout
+| Step | Command | Runs | Output |
+|---|---|---|---|
+| Describe the setup | `robots/<name>.yaml`, `stations/<name>.yaml` | – | a Robot, a Station |
+| Generate a Dataset | `data_generation/pipeline/gen_dataset.sh` | SLURM GPU jobs, in the generation image | `<data root>/datasets/<name>/` |
+| Build a Corpus | `heron prepare <recipe>` | here, or a CPU job (`--submit`) | `<data root>/corpora/<name>/` |
+| Train | `heron train <recipe>` | a GPU job (SLURM or `--local`) | `<data root>/experiments/<name>_<date>/` |
+| Evaluate | `heron evaluate <experiment>` | a GPU job, chained after training | `results/<experiment>.yaml` |
+| Time with TensorRT | `heron export`, `heron benchmark` | any machine with a GPU | `results/<experiment>/benchmark_<gpu>.yaml` |
+
+Each step only reads what the previous one wrote, and records where its input came from
+(`dataset.yaml`, `corpus.yaml`, `experiment.yaml`), so a result traces back to its data.
+
+## Layout
 
 ```
-CapaciNet/
- └─ unet_3d/
-     ├─ launch/                        # ROS 2 launch files
-     │    ├─ create_reachability_map.launch.py
-     │    └─ generate_data.launch.py
-     ├─ script/
-     │    ├─ format_data.py            # HDF5 converter: upsampling + augmentation + train/val split
-     │    └─ augment_rotation_z.py     # RotationAugmenter class (used by format_data.py)
-     ├─ config/
-     │    └─ train_reach.yaml          # Training hyper‑parameters
-     └─ data/
-          ├─ train/                    # Raw + label volumes for training
-          └─ val/                      # Raw + label volumes for validation
+robots/  stations/       one YAML per Robot and per Station
+corpus/  training/       recipes: example.yaml shows every key
+heron/                   the Python package and the `heron` command
+data_generation/         ROS 2 C++ package (IK over a voxel grid -> HDF5) and its SLURM pipeline
+images/                  container build files (docs/images.md: what each environment must provide)
+results/                 evaluation and benchmark summaries, committed
+tests/                   pytest, no GPU or cluster needed
+unet_3d/                 training docs, past experiments and the scripts heron replaces
+docs/                    environments, ADRs, prompts for building the images
+site.example.yaml        copy to site.yaml: accounts, modules, images, data root (not versioned)
 ```
 
----
+Generated data lives outside the repository, under the data root: `HERON_DATA_ROOT`, else
+`data_root` in `site.yaml`, else the directory that contains the repository.
 
-## 🚀 Quick start
+## Install
 
-### 1  Generate the reachability map
+Heron itself needs Python 3.10+ with PyYAML, numpy, scipy, h5py and matplotlib. Training,
+evaluation and TensorRT need more, in a venv or an Apptainer image ([docs/images.md](docs/images.md)).
+
+On an Alliance cluster (Narval, Rorqual…), in a venv:
 
 ```bash
-ros2 launch unet_3d create_reachability_map.launch.py
+module load python/3.11.5
+python -m venv ~/envs/heron && source ~/envs/heron/bin/activate
+pip install --no-index torch torchvision tensorboard tqdm scikit-image   # Alliance wheels
+pip install -e '.[train,test]'                                           # pytorch3dunet 1.9.6 from PyPI
+# optional, for heron export / benchmark / evaluate --precision: see requirements-trt.txt
+cp site.example.yaml site.yaml    # then fill in your SLURM accounts and paths
+heron doctor                      # tiny end-to-end run on a GPU, reports OK/KO per step
 ```
 
-This step spawns your robot in a head‑less Gazebo instance and saves a coloured `.ply` RM in `~/.ros/`. Adjust the robot URDF or TCP frame as needed.
+On a workstation or a Jetson, without SLURM: set `scheduler: local` in `site.yaml`, or pass
+`--local` to any command that runs a job.
 
-### 2  Create the raw dataset
+## Quick start
 
 ```bash
-ros2 launch unet_3d generate_data.launch.py output:=${PWD}/unet_3d/data/raw
+heron robots                      # m1013, ur5e, jaco7, iiwa
+heron stations leeloo             # its scene grid and 128³ crop at 0.02 m
+
+# 1. Dataset: 4 tasks of 2 scenes (about 1 h 30 per scene on an A100)
+bash data_generation/pipeline/gen_dataset.sh --robot m1013 --station leeloo \
+    --mode synthetic --array 4 --dataset-size 2 --out my_dataset --dry-run   # then without --dry-run
+
+# 2. Corpus: crop, split by Source, augment the train part (copy corpus/example.yaml)
+heron prepare corpus/my_corpus.yaml
+
+# 3. Experiment: training, then evaluation on val and every test part
+heron train training/my_run.yaml
+heron experiments                  # progress and best validation score
+heron evaluate my_run_<date> --figures
+
+# 4. TensorRT (optional)
+heron export my_run_<date>
+heron benchmark my_run_<date> --precision fp32 fp16 int8
 ```
 
-Each RM voxel is exported as a 3‑D Numpy array together with a binary reachability label.
+Details: [data_generation/pipeline/README.md](data_generation/pipeline/README.md) (generation
+modes and options), [unet_3d/README.md](unet_3d/README.md) (training, evaluation, TensorRT),
+[results/README.md](results/README.md) (what the result files hold).
 
-### 3  Re‑format the data
+## Status
 
-`unet_3d/script/format_data.py` reads the raw HDF5 files produced by the data generation step
-(structure `group/N/voxel_grid` + `reachability_map`), converts them to the **pytorch‑3dunet**
-layout (`raw` / `label` datasets), and optionally upsamples, augments, and splits the dataset.
+| Part | State |
+|---|---|
+| Robot, Station, Corpus, training, evaluation | tested on Narval A100 (SLURM and `--local`), 106 pytest tests |
+| TensorRT export and benchmark | tested on A100 (TensorRT 10.16); Jetson Orin (JetPack 7.2) not yet measured |
+| Generation | runs in the ROS 2 Humble + cuRobo v1 image; moving to ROS 2 Jazzy + cuRobo v2 ([docs/prompts/generation-image.md](docs/prompts/generation-image.md)) |
+| Generation, `scene` mode | old image only: not yet ported to the Jazzy image |
+| Training image (`images/training/Dockerfile`) | never built; clusters use the venv |
 
-**Context:** each source file can contain multiple robot configurations (groups). The script
-iterates over all groups, automatically detects the voxel resolution from the `voxel_size`
-attribute, and upsamples to 0.02 m if the resolution differs.
+`unet_3d/script/` (`launch_training.py`, `format_data.py`, `evaluate.py`…) and
+`unet_3d/run_training.sh` are superseded by `heron prepare`, `heron train` and
+`heron evaluate`, and will be removed.
 
-```bash
-# Minimal usage – convert only
-python unet_3d/script/format_data.py
+## Contributing
 
-# Custom input / output directories
-python unet_3d/script/format_data.py \
-    --input_dir  /path/to/raw/data/ \
-    --output_dir /path/to/unet3d/data/
+Issues and pull requests are welcome on [Lab-CORO/CapaciNet](https://github.com/Lab-CORO/CapaciNet).
+Commits follow [Conventional Commits](https://www.conventionalcommits.org). Run
+`python -m pytest -q` before submitting. Never commit `site.yaml` or a personal SLURM account.
 
-# With data augmentation (3 random Z‑rotations per group)
-python unet_3d/script/format_data.py --n_copies 3
+## License
 
-# With augmentation + train/val split (90 % / 10 %)
-python unet_3d/script/format_data.py --n_copies 3 --split
-
-# Full control
-python unet_3d/script/format_data.py \
-    --input_dir      /path/to/raw/data/ \
-    --output_dir     /path/to/unet3d/data/ \
-    --n_copies       5   \
-    --angle_spectrum 90  \
-    --aug_seed       0   \
-    --split              \
-    --val_ratio      0.15 \
-    --seed           42
-```
-
-| Argument | Default | Description |
-|---|---|---|
-| `--input_dir` | `…/data/` | Source HDF5 files |
-| `--output_dir` | `…/unet_3d/data/` | Destination directory |
-| `--n_copies` | `0` | Augmented copies per group (0 = disabled) |
-| `--angle_spectrum` | `180` | Max Z‑rotation angle in degrees |
-| `--aug_seed` | `42` | Random seed for augmentation |
-| `--split` | off | Move files into `train/` and `val/` after conversion |
-| `--val_ratio` | `0.1` | Fraction of files assigned to validation |
-| `--seed` | `0` | Random seed for train/val split |
-
-The augmentation logic lives in `augment_rotation_z.py` as a `RotationAugmenter` class and
-can also be imported independently in other scripts.
-
-### 6  *(Optional)* Pad the volumes
-
-If your data dimensions are **not** divisible by the network’s stride (e.g. 16), pad them:
-
-```bash
-python unet_3d/scripts/format_data.py --pad 8
-```
-
-### 7  Launch training
-
-```bash
-train3dunet --config unet_3d/config/train_reach.yaml
-```
-
-Monitor progress with **TensorBoard**:
-
-```bash
-tensorboard --logdir runs
-```
-
----
-
-## ⚙️ Environment
-
-```bash
-# Example using Miniconda
-conda create -n capacinet python=3.10
-conda activate capacinet
-pip install -r requirements.txt  # See root folder
-
-# ROS 2 Humble (Ubuntu 22.04)
-source /opt/ros/humble/setup.bash
-colcon build --packages-select unet_3d
-```
-
-Key dependencies:
-
-* ROS 2 `sensor_msgs`, `open3d_ros2`
-* `PyTorch >=2.0` + CUDA 11.8
-* `pytorch‑3dunet`
-* `open3d`, `h5py`, `scikit‑learn`
-
-Docker images are provided in `docker/` for reproducibility.
-
----
-
-## 📊 Results & checkpoints
-
-Pre‑trained weights and sample RMs are available on the [release page](https://github.com/Lab-CORO/CapaciNet/releases). To evaluate on your own reachability map:
-
-```bash
-python unet_3d/scripts/infer.py --weights checkpoints/best_model.pth --input my_map.h5
-```
-
----
-
-## 🤝 Contributing
-
-Issues and PRs are welcome! Please follow the [Conventional Commits](https://www.conventionalcommits.org) style and run `pre‑commit` before submitting.
-
----
-
-## 📄 License
-
-Distributed under the **MIT License**. See `LICENSE` for details.
-
----
-
-## 📧 Contact
-
-For questions, open an [issue](https://github.com/Lab-CORO/CapaciNet/issues) or reach us at **coro‑[dev@etsmtl.ca](mailto:dev@etsmtl.ca)**.
-
----
-
-*Happy training!*
+MIT, see [LICENSE](LICENSE).
