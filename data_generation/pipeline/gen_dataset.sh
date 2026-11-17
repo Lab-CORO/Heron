@@ -230,12 +230,23 @@ case "$MODE" in
         --time="${TIME:-16:00:00}" \
         --mem-per-cpu="${MEM}G"
     else
+      # A scene takes ~1 h 30 on an A100 (voxel 0.02, batch 10000): allow 1 h 45 per scene
+      # plus 15 min of startup. A task that still runs out of time keeps its finished
+      # scenes (job.sbatch collects them on the warning signal).
+      [[ "$DATASET_SIZE" =~ ^[0-9]+$ ]] || die "--dataset-size must be a whole number"
+      est_min=$(( DATASET_SIZE * 105 + 15 ))
+      est_time="$(( est_min / 60 )):$(printf '%02d' $(( est_min % 60 ))):00"
+      if [ -n "$TIME" ]; then
+        IFS=: read -r -a t <<< "$TIME"
+        case ${#t[@]} in 3) given=$(( 10#${t[0]} * 60 + 10#${t[1]} ));; 2) given=$(( 10#${t[0]} ));; *) given=0;; esac
+        [ "$given" -lt "$est_min" ] && echo "WARNING: --time ${TIME} is shorter than the ~${est_time} that ${DATASET_SIZE} scene(s) take: tasks will stop early and keep only their finished scenes." >&2
+      fi
       submit "$DATA_DIR" "" \
         --array="${ARRAY_SPEC}" \
         --job-name="capa_syn_${OUT}" \
         --output="log/output/capa_syn_${OUT}_%A_%a.txt" \
         --error="log/error/capa_syn_${OUT}_%A_%a.txt" \
-        --time="${TIME:-2:00:00}" \
+        --time="${TIME:-${est_time}}" \
         --mem-per-cpu="${MEM}G"
     fi
     ;;

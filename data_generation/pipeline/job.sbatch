@@ -7,6 +7,9 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --export=ALL,DISABLE_DCGM=1
+# USR1 to this script (B:) 10 min before the time limit: stop the container and collect
+# the scenes already saved, instead of losing them when SLURM kills the task.
+#SBATCH --signal=B:USR1@600
 #
 # Generic SLURM job for the unified data-generation pipeline.
 # Submitted by gen_dataset.sh, which overrides --array / --time / --job-name /
@@ -115,12 +118,33 @@ for v in MODE VOXEL DATASET_SIZE BATCH_SIZE INIT_BATCH_SIZE OBJ_MAX REACH_MAX \
   export "APPTAINERENV_${v}=${!v-}"
 done
 
+# The container runs in the background, in its own process group, so that the USR1
+# that SLURM sends before the time limit reaches this script (bash only runs a trap
+# between commands, never during a foreground one) and can stop the whole container.
+# generate_data flushes its .h5 after every scene, so what is collected below holds
+# every finished scene. A task stopped this way exits 124.
+TIMED_OUT=0
+stop_container() {
+  TIMED_OUT=1
+  echo "Time limit close: stopping the container to collect the finished scenes." >&2
+  kill -INT -- "-${APPTAINER_PID}" 2>/dev/null          # ros2 launch shuts its nodes down on SIGINT
+  for _ in $(seq 1 24); do kill -0 "${APPTAINER_PID}" 2>/dev/null || return; sleep 5; done
+  kill -TERM -- "-${APPTAINER_PID}" 2>/dev/null; sleep 20
+  kill -KILL -- "-${APPTAINER_PID}" 2>/dev/null
+}
+trap stop_container USR1
+
 echo "Launching apptainer (MODE=${MODE}, task=${SLURM_ARRAY_TASK_ID:-n/a})..."
-apptainer exec -C --net --network=none --nv \
+setsid -w apptainer exec -C --net --network=none --nv \
   "${BINDS[@]}" \
   "${SIF}" \
-  bash "${CONTAINER_DATA}/run_generation.sh"
+  bash "${CONTAINER_DATA}/run_generation.sh" &
+APPTAINER_PID=$!
+wait "${APPTAINER_PID}"
 STATUS=$?
+# A trapped signal interrupts `wait` before the container is gone: wait for it again.
+while kill -0 "${APPTAINER_PID}" 2>/dev/null; do wait "${APPTAINER_PID}"; done
+[ "${TIMED_OUT}" -eq 1 ] && STATUS=124
 
 # Collect the task's output and drop its private directory. Every .h5 here belongs to
 # this task (it owned the whole directory), so unlike the old `ls -t | head -1` over a
