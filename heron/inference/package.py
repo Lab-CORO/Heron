@@ -7,6 +7,9 @@
     <package>/calibration.h5        `raw` volumes of the train part, for int8 calibration
     <package>/engines/              built on each machine, never copied along (see engine.py)
 
+The manifest's grid says where the network's input lies around the robot base, so a robot
+can check its Scenes against it: the voxel size and the origin, both in meters.
+
 Export runs where torch, pytorch3dunet and onnx are installed (the cluster venv): a CPU
 trace of the network, seconds to a minute.
 """
@@ -100,6 +103,43 @@ def write_calibration(path: Path, files: list[Path], shape: tuple) -> None:
         ds.attrs["sources"] = [f.name for f in files]
 
 
+def grid(files: list[Path], shape: tuple, voxel_size: float | None = None,
+         origin: tuple[float, float, float] | None = None) -> dict | None:
+    """Where the network's input lies: voxel size and origin (m), the position of voxel [0, 0, 0]
+    relative to the robot base, as in the generator's origine_* attributes (voxel i at
+    origin + i * voxel_size).
+
+    Read from the volumes' attributes when they describe the volume: older formatters cropped
+    the volumes but kept the uncropped Scene's attributes, which a voxel_grid_size_* other than
+    the shape gives away. Else from voxel_size and origin. None when neither says it.
+    """
+    if (voxel_size is None) != (origin is None):
+        raise HeronConfigError("give the voxel size and the origin together (--voxel-size and --origin)")
+    import h5py
+    found = set()
+    for f in files:
+        with h5py.File(f, "r") as h:
+            attrs = dict(h["raw"].attrs)
+        keys = ["voxel_size"] + [f"origine_{a}" for a in "xyz"] + [f"voxel_grid_size_{a}" for a in "xyz"]
+        if any(k not in attrs for k in keys) or \
+                tuple(int(round(float(attrs[f"voxel_grid_size_{a}"]))) for a in "xyz") != tuple(shape):
+            continue
+        found.add((round(float(attrs["voxel_size"]), 6), tuple(round(float(attrs[f"origine_{a}"]), 6) for a in "xyz")))
+    if len(found) > 1:
+        raise HeronConfigError(f"the calibration volumes disagree on their grid: {sorted(found)}")
+    read = found.pop() if found else None
+    if voxel_size is not None:
+        given = (round(float(voxel_size), 6), tuple(round(float(v), 6) for v in origin))
+        if read and not (abs(read[0] - given[0]) < 1e-6 and all(abs(a - b) < 1e-6 for a, b in zip(read[1], given[1]))):
+            raise HeronConfigError(f"the volumes say voxel size {read[0]} m and origin {list(read[1])} m, "
+                                   f"not the {given[0]} m and {list(given[1])} m given")
+        return {"voxel_size": given[0], "origin": list(given[1]),
+                "source": "volume attributes" if read else "given at export"}
+    if read:
+        return {"voxel_size": read[0], "origin": list(read[1]), "source": "volume attributes"}
+    return None
+
+
 def export_onnx(config: dict, checkpoint: Path, shape: tuple, path: Path) -> None:
     import onnx
     import torch
@@ -128,8 +168,12 @@ def _versions() -> dict:
 
 
 def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", calibration: Path | None = None,
-           samples: int = CALIBRATION_SAMPLES, force: bool = False, log=print) -> Path:
-    """Write the Experiment's package (by default <experiment>/package). Returns its directory."""
+           samples: int = CALIBRATION_SAMPLES, force: bool = False, voxel_size: float | None = None,
+           origin: tuple[float, float, float] | None = None, log=print) -> Path:
+    """Write the Experiment's package (by default <experiment>/package). Returns its directory.
+
+    voxel_size, origin: the grid, for volumes whose attributes do not describe it (see grid()).
+    """
     from heron.training import _git_commit, read_manifest
 
     if checkpoint not in ("best", "last"):
@@ -147,6 +191,10 @@ def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", 
         raise HeronConfigError(f"{experiment.name}: no train data found for int8 calibration "
                                f"(give a directory of .h5 with a raw dataset: --calibration DIR)")
     chosen = pick(list(Path(source).glob("*.h5")), samples)
+    placement = grid(chosen, shape, voxel_size, origin)
+    if placement is None:
+        log("grid: the volumes do not say where they lie around the base, and no --voxel-size / --origin "
+            "was given: a robot will not be able to check its Scenes against this package")
 
     partial = out.with_name(out.name + ".partial")
     shutil.rmtree(partial, ignore_errors=True)
@@ -164,6 +212,7 @@ def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", 
             "corpus": read_manifest(experiment).get("corpus"),
             "checkpoint": checkpoint,
             "input_shape": list(shape),
+            "grid": placement,
             "onnx_opset": OPSET,
             "calibration": {"source": str(source), "volumes": len(chosen)},
             "versions": _versions(),

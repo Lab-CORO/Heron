@@ -28,9 +28,19 @@ def config(patch=SHAPE, train_dir=None) -> dict:
     }
 
 
-def write_raw(path: Path, shape=SHAPE, seed=0):
+def write_raw(path: Path, shape=SHAPE, seed=0, attrs=None):
     with h5py.File(path, "w") as f:
-        f.create_dataset("raw", data=(np.random.RandomState(seed).rand(*shape) < 0.2).astype(np.float64))
+        ds = f.create_dataset("raw", data=(np.random.RandomState(seed).rand(*shape) < 0.2).astype(np.float64))
+        ds.attrs.update(attrs or {})
+
+
+def grid_attrs(voxel_size=0.02, origin=(-0.16, -0.16, -0.16), size=SHAPE) -> dict:
+    """The attributes the generator writes, as float32 like it does."""
+    attrs = {"voxel_size": np.float32(voxel_size)}
+    for axis, o, n in zip("xyz", origin, size):
+        attrs[f"origine_{axis}"] = np.float32(o)
+        attrs[f"voxel_grid_size_{axis}"] = float(n)
+    return attrs
 
 
 @pytest.fixture
@@ -98,6 +108,43 @@ def test_export_without_train_data_asks_for_it(tiny_experiment, tmp_path):
         f.unlink()
     with pytest.raises(HeronConfigError, match="--calibration"):
         package.export(tiny_experiment, log=lambda *_: None)
+
+
+def test_the_grid_is_read_from_volumes_that_describe_it(tmp_path):
+    write_raw(tmp_path / "a.h5", attrs=grid_attrs())
+    write_raw(tmp_path / "b.h5", attrs=grid_attrs())
+    assert package.grid([tmp_path / "a.h5", tmp_path / "b.h5"], SHAPE) == \
+        {"voxel_size": 0.02, "origin": [-0.16, -0.16, -0.16], "source": "volume attributes"}
+
+
+def test_attributes_of_the_uncropped_scene_are_not_the_grid(tmp_path):
+    # Older formatters cropped 152³ Scenes to 128³ but kept the 152³ attributes.
+    write_raw(tmp_path / "a.h5", attrs=grid_attrs(origin=(-1.52,) * 3, size=(152,) * 3))
+    files = [tmp_path / "a.h5"]
+    assert package.grid(files, SHAPE) is None
+    assert package.grid(files, SHAPE, 0.02, (-1.28, -1.28, -1.28)) == \
+        {"voxel_size": 0.02, "origin": [-1.28, -1.28, -1.28], "source": "given at export"}
+
+
+def test_a_given_grid_must_agree_with_the_volumes(tmp_path):
+    write_raw(tmp_path / "a.h5", attrs=grid_attrs())
+    with pytest.raises(HeronConfigError, match="not the 0.04 m"):
+        package.grid([tmp_path / "a.h5"], SHAPE, 0.04, (-0.16, -0.16, -0.16))
+    with pytest.raises(HeronConfigError, match="together"):
+        package.grid([tmp_path / "a.h5"], SHAPE, voxel_size=0.02)
+    write_raw(tmp_path / "b.h5", attrs=grid_attrs(origin=(0.0, 0.0, 0.0)))
+    with pytest.raises(HeronConfigError, match="disagree"):
+        package.grid([tmp_path / "a.h5", tmp_path / "b.h5"], SHAPE)
+
+
+def test_export_writes_the_grid_into_the_manifest(tiny_experiment):
+    pytest.importorskip("onnx")
+    logged = []
+    out = package.export(tiny_experiment, samples=2, log=logged.append)
+    assert package.load(out)["grid"] is None and any("--voxel-size" in m for m in logged)
+    out = package.export(tiny_experiment, samples=2, force=True, voxel_size=0.02, origin=(-0.16, -0.16, -0.16),
+                         log=lambda *_: None)
+    assert package.load(out)["grid"]["origin"] == [-0.16, -0.16, -0.16]
 
 
 # --- engines ----------------------------------------------------------------------------------

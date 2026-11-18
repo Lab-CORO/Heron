@@ -177,7 +177,8 @@ def _export(args) -> None:
     from heron.inference.package import export
     experiment = training.find_experiment(args.experiment)
     out = export(experiment, Path(args.out) if args.out else None, args.checkpoint,
-                 Path(args.calibration) if args.calibration else None, args.calibration_volumes, args.force)
+                 Path(args.calibration) if args.calibration else None, args.calibration_volumes, args.force,
+                 args.voxel_size, tuple(args.origin) if args.origin else None)
     print(f"package {out}")
     print(f"time it on this machine's GPU with: heron benchmark {out} --precision fp32 fp16 int8")
 
@@ -303,6 +304,10 @@ def main(argv=None) -> int:
                    help="train volumes for int8 calibration (default: the corpus's train part)")
     p.add_argument("--calibration-volumes", type=int, default=200, help="how many of them to package (default 200)")
     p.add_argument("--force", action="store_true", help="replace an existing package, engines included")
+    p.add_argument("--voxel-size", type=float, metavar="M",
+                   help="voxel size of the network's input, when the volumes' attributes do not say it")
+    p.add_argument("--origin", type=float, nargs=3, metavar=("X", "Y", "Z"),
+                   help="position of voxel [0, 0, 0] from the robot base (m), with --voxel-size")
 
     p = sub.add_parser("benchmark", help="time a package on a GPU: PyTorch fp32, then TensorRT engines")
     p.add_argument("package", help="package directory, or an experiment (its package)")
