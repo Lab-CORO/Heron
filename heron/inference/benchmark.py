@@ -17,16 +17,18 @@ from pathlib import Path
 import yaml
 
 from heron.errors import HeronConfigError
-from heron.inference.engine import PRECISIONS, TrtNetwork, build, slug
-from heron.inference.package import CHECKPOINT, CONFIG, load
+from heron.inference.engine import PRECISIONS, build, slug
+from heron.inference.package import CONFIG
+from heron.inference.package import load as load_manifest
+from heron.inference.predictor import PYTORCH, Predictor, load
 from heron.inference.timing import SAMPLES, WARMUP, POOL, DENSITY, machine, time_predictor, volumes
 
 BASELINE = "pytorch_fp32"
 
 
 def tensorrt_predictor(package: Path, config: dict, precision: str, gpu: str, rebuild: bool = False, log=print):
-    """A Predictor running the package's engine for this GPU. Returns (predictor, engine, build seconds)."""
-    from heron.evaluation.measure import Predictor
+    """A Predictor running the package's engine for this GPU, built first unless cached.
+    Returns (predictor, engine, build seconds)."""
     try:
         import tensorrt  # noqa: F401
     except ImportError:
@@ -34,7 +36,7 @@ def tensorrt_predictor(package: Path, config: dict, precision: str, gpu: str, re
                                "(on a Jetson, a venv with --system-site-packages sees JetPack's)") from None
     transform = Predictor(config, None, network=lambda x: x)
     path, seconds = build(package, precision, gpu, prepare=transform.to_input, rebuild=rebuild, log=log)
-    return Predictor(config, None, network=TrtNetwork(path)), path, seconds
+    return load(package, precision, gpu), path, seconds
 
 
 def speedup(baseline: dict, run: dict) -> dict:
@@ -50,9 +52,8 @@ def agreement(reference, prediction) -> dict:
 def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: int = WARMUP,
         rebuild: bool = False, log=print) -> dict:
     import torch
-    from heron.evaluation.measure import Predictor
 
-    manifest = load(package)
+    manifest = load_manifest(package)
     config = yaml.safe_load((package / CONFIG).read_text())
     if not torch.cuda.is_available():
         raise HeronConfigError("no GPU visible: the benchmark times GPU inference")
@@ -61,7 +62,7 @@ def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: in
     info = machine(torch)
 
     log(f"{BASELINE}: {samples} volumes after {warmup} warmup")
-    baseline = Predictor(config, package / CHECKPOINT)
+    baseline = load(package, PYTORCH)
     runs = {BASELINE: time_predictor(baseline, pool, samples, warmup)}
     reference = baseline.predict(pool[0])
     del baseline

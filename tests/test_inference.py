@@ -10,7 +10,7 @@ from heron import training
 from heron.cli import main
 from heron.errors import HeronConfigError
 from heron.evaluation import jobs as eval_jobs, measure
-from heron.inference import benchmark, engine, jobs, package, timing
+from heron.inference import benchmark, engine, jobs, package, predictor, timing
 from heron.site import load_site
 
 SHAPE = (16, 16, 16)
@@ -145,6 +145,58 @@ def test_export_writes_the_grid_into_the_manifest(tiny_experiment):
     out = package.export(tiny_experiment, samples=2, force=True, voxel_size=0.02, origin=(-0.16, -0.16, -0.16),
                          log=lambda *_: None)
     assert package.load(out)["grid"]["origin"] == [-0.16, -0.16, -0.16]
+
+
+# --- load: the package's network for a program -------------------------------------------------
+
+@pytest.fixture
+def tiny_package(tiny_experiment):
+    pytest.importorskip("onnx")
+    return package.export(tiny_experiment, samples=2, log=lambda *_: None)
+
+
+def test_load_predicts_through_the_experiments_val_transform(tiny_package, tiny_experiment):
+    loaded = predictor.load(tiny_package)
+    assert loaded.backend == "pytorch" and loaded.manifest["experiment"] == tiny_experiment.name
+    scene = (np.random.RandomState(1).rand(*SHAPE) < 0.2).astype(np.float32)
+    direct = predictor.Predictor(yaml.safe_load((tiny_experiment / "config.yaml").read_text()),
+                                 tiny_experiment / "checkpoint" / "best_checkpoint.pytorch")
+    out = loaded.predict(scene)
+    assert out.shape == SHAPE and out.dtype == np.float32
+    np.testing.assert_allclose(out, direct.predict(scene), atol=1e-6)
+
+
+def test_load_refuses_an_unknown_precision(tiny_package):
+    with pytest.raises(HeronConfigError, match="precision must be pytorch or one of"):
+        predictor.load(tiny_package, "bf16")
+
+
+def test_a_missing_engine_is_an_error_naming_how_to_build_it(tiny_package):
+    pytest.importorskip("tensorrt")
+    with pytest.raises(HeronConfigError, match="no fp16 engine for Test GPU .*heron.inference.benchmark --package"):
+        predictor.load(tiny_package, "fp16", gpu="Test GPU")
+
+
+def test_fallback_runs_pytorch_and_says_so(tiny_package):
+    pytest.importorskip("tensorrt")
+    logged = []
+    loaded = predictor.load(tiny_package, "fp16", gpu="Test GPU", fallback=True, log=logged.append)
+    assert loaded.backend == "pytorch"
+    assert len(logged) == 1 and "no fp16 engine" in logged[0] and "falling back to PyTorch" in logged[0]
+
+
+def test_load_runs_the_engine_benchmark_built(tiny_package):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("tensorrt")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a GPU")
+    gpu = torch.cuda.get_device_name(0)
+    config = yaml.safe_load((tiny_package / package.CONFIG).read_text())
+    built, _, _ = benchmark.tensorrt_predictor(tiny_package, config, "fp32", gpu, log=lambda *_: None)
+    loaded = predictor.load(tiny_package, "fp32")
+    assert built.backend == loaded.backend == "tensorrt_fp32"
+    scene = (np.random.RandomState(2).rand(*SHAPE) < 0.2).astype(np.float32)
+    np.testing.assert_allclose(loaded.predict(scene), predictor.load(tiny_package).predict(scene), atol=1e-3)
 
 
 # --- engines ----------------------------------------------------------------------------------

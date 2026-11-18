@@ -25,61 +25,12 @@ from heron.evaluation.cache import EVAL_DATA_FILENAME, save_eval_data
 from heron.evaluation.metrics import (N_CLASSES, REGION_NAMES, compute_error_histogram, confusion_matrix,
                                       region_masks, regression_metrics, to_classes)
 from heron.evaluation.report import summarize, write_report
+from heron.inference.predictor import Predictor
 
 
 def part_dir_name(part: str) -> str:
     """test:reel -> test_reel (a directory name)."""
     return part.replace(":", "_")
-
-
-class Predictor:
-    """The Experiment's val raw transform, as pytorch-3dunet builds it, then a network:
-    its PyTorch model (from the checkpoint), or any callable on the same input, such as a
-    TensorRT engine (heron.inference.engine.TrtNetwork)."""
-
-    def __init__(self, config: dict, checkpoint: Path | None, network=None):
-        import torch
-
-        self.torch = torch
-        self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.network = network or self._pytorch(checkpoint)
-
-    def _pytorch(self, checkpoint: Path):
-        from pytorch3dunet.unet3d.model import get_model
-
-        # Strict fp32, as the TensorRT engines are built (TF32 off), so the baseline is comparable.
-        self.torch.backends.cudnn.allow_tf32 = False
-        self.torch.backends.cuda.matmul.allow_tf32 = False
-        model = get_model(self.config["model"])
-        state = self.torch.load(checkpoint, map_location=self.device, weights_only=False)  # our own checkpoints
-        model.load_state_dict(state["model_state_dict"])
-        model.to(self.device).eval()
-        return model
-
-    def raw_transform(self, raw: np.ndarray):
-        # Same as pytorch3dunet.datasets.hdf5.AbstractHDF5Dataset: stats over the whole
-        # volume only if global_normalization is on (heron writes it out; 1.9.6's default is
-        # off), then the val 'raw' transformer chain.
-        from pytorch3dunet.augment.transforms import Transformer
-        from pytorch3dunet.datasets.utils import calculate_stats
-
-        loaders = self.config["loaders"]
-        stats = calculate_stats(raw) if loaders.get("global_normalization", False) else calculate_stats(None, True)
-        return Transformer(loaders["val"]["transformer"], stats).raw_transform()(raw)
-
-    def to_input(self, raw: np.ndarray):
-        """A volume as the network takes it: (1, 1, D, H, W) float32 on the device."""
-        x = self.raw_transform(raw)
-        x = x if isinstance(x, self.torch.Tensor) else self.torch.from_numpy(np.asarray(x))
-        return x.unsqueeze(0).float().to(self.device).contiguous()
-
-    def infer(self, x):
-        with self.torch.no_grad():
-            return self.network(x)
-
-    def predict(self, raw: np.ndarray) -> np.ndarray:
-        return self.infer(self.to_input(raw)).squeeze().cpu().numpy().astype(np.float32)
 
 
 def measure_part(predictor: Predictor, files: list[Path], log=print) -> dict:
