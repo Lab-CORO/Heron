@@ -81,9 +81,9 @@ def test_export_writes_a_portable_package(tiny_experiment):
     assert out == tiny_experiment / "package"
     manifest = package.load(out)
     assert manifest["experiment"] == tiny_experiment.name and manifest["checkpoint"] == "best"
-    assert manifest["input_shape"] == list(SHAPE) and manifest["calibration"]["volumes"] == 3
+    assert manifest["input"]["shape"] == list(SHAPE) and manifest["calibration"]["volumes"] == 3
     with h5py.File(out / package.CALIBRATION) as f:
-        assert f["raw"].shape == (3, *SHAPE) and f["raw"].dtype == np.float32
+        assert f["input"].shape == (3, *SHAPE) and f["input"].dtype == np.float32
     import onnx
     dims = [d.dim_value for d in onnx.load(str(out / package.ONNX)).graph.input[0].type.tensor_type.shape.dim]
     assert dims == [1, 1, *SHAPE]
@@ -145,6 +145,69 @@ def test_export_writes_the_grid_into_the_manifest(tiny_experiment):
     out = package.export(tiny_experiment, samples=2, force=True, voxel_size=0.02, origin=(-0.16, -0.16, -0.16),
                          log=lambda *_: None)
     assert package.load(out)["grid"]["origin"] == [-0.16, -0.16, -0.16]
+
+
+# --- a self-contained package: everything a robot needs, as values ----------------------------
+
+def test_the_encoding_is_what_normalize_makes_of_occupancy():
+    pytest.importorskip("pytorch3dunet")
+    assert package.encoding(config(), SHAPE) == {"free": -1.0, "occupied": 1.0}
+
+
+def test_a_transform_no_table_can_stand_for_is_refused():
+    pytest.importorskip("pytorch3dunet")
+    cfg = config()
+    cfg["loaders"]["val"]["transformer"] = {"raw": [{"name": "Standardize"}, {"name": "ToTensor", "expand_dims": True}]}
+    with pytest.raises(HeronConfigError, match="one value whatever the Scene"):
+        package.encoding(cfg, SHAPE)
+
+
+def test_the_manifest_spells_out_how_to_feed_the_network(tiny_package):
+    manifest = package.load(tiny_package)
+    assert manifest["format"] == package.FORMAT == 1
+    assert manifest["input"] == {"shape": list(SHAPE), "axes": ["x", "y", "z"], "dtype": "float32",
+                                 "batch": 1, "channels": 1, "encoding": {"free": -1.0, "occupied": 1.0}}
+    assert manifest["output"] == {"shape": list(SHAPE), "dtype": "float32", "activation": "sigmoid",
+                                  "range": [0.0, 1.0]}
+    for key in ("onnx", "calibration", "reference"):
+        assert (tiny_package / manifest[key]["file"]).is_file()
+    assert package.shape_of(manifest) == SHAPE
+
+
+def test_calibration_volumes_are_already_through_the_val_transform(tiny_package, tiny_experiment):
+    transform = package.val_transform(yaml.safe_load((tiny_experiment / "config.yaml").read_text()))
+    sources = sorted((tiny_experiment.parent / "train").glob("*.h5"))
+    with h5py.File(tiny_package / package.CALIBRATION) as f:
+        names = list(f["input"].attrs["sources"])
+        for i, name in enumerate(names):
+            raw = h5py.File(next(s for s in sources if s.name == name))["raw"][:]
+            np.testing.assert_array_equal(f["input"][i], transform(raw))
+
+
+def test_reference_scenes_through_the_manifest_encoding_give_the_reference_maps(tiny_package):
+    """What a robot does without heron: occupancy -> encoding table -> network."""
+    torch = pytest.importorskip("torch")
+    from pytorch3dunet.unet3d.model import get_model
+    manifest = package.load(tiny_package)
+    model = get_model(yaml.safe_load((tiny_package / package.CONFIG).read_text())["model"])
+    model.load_state_dict(torch.load(tiny_package / package.CHECKPOINT, weights_only=False)["model_state_dict"])
+    model.eval()
+    enc = manifest["input"]["encoding"]
+    with h5py.File(tiny_package / package.REFERENCE) as f:
+        assert len(f["scene"]) == 2 and set(np.unique(f["scene"][:])) <= {0, 1}
+        for scene, expected in zip(f["scene"][:], f["reachability"][:]):
+            x = torch.from_numpy(np.where(scene > 0, enc["occupied"], enc["free"]).astype(np.float32))[None, None]
+            with torch.no_grad():
+                out = model(x).squeeze().numpy()
+            np.testing.assert_allclose(out, expected, atol=1e-5)
+
+
+def test_a_package_of_a_newer_format_is_refused(tiny_package):
+    manifest = yaml.safe_load((tiny_package / package.MANIFEST).read_text())
+    manifest["format"] = package.FORMAT + 1
+    (tiny_package / package.MANIFEST).write_text(yaml.safe_dump(manifest))
+    with pytest.raises(HeronConfigError, match="this heron reads up to 1: update heron"):
+        package.load(tiny_package)
 
 
 # --- load: the package's network for a program -------------------------------------------------

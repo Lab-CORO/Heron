@@ -44,15 +44,20 @@ def _logger():
 
 
 def _calibrator(package: Path, prepare, cache: Path):
-    """Entropy calibrator over the package's calibration volumes, through the val transform."""
+    """Entropy calibrator over the package's calibration volumes: `input` (format 1, already through
+    the val transform), else `raw` through prepare."""
     import h5py
     import tensorrt as trt
 
     class Calibrator(trt.IInt8EntropyCalibrator2):
         def __init__(self):
             super().__init__()
+            import torch
+
             self.file = h5py.File(package / CALIBRATION, "r")
-            self.raw = self.file["raw"]
+            encoded = "input" in self.file
+            self.raw = self.file["input"] if encoded else self.file["raw"]
+            self.prepare = (lambda v: torch.from_numpy(v)[None, None].float().cuda()) if encoded else prepare
             self.i = 0
             self.batch = None           # kept alive until TensorRT asks for the next one
 
@@ -62,7 +67,7 @@ def _calibrator(package: Path, prepare, cache: Path):
         def get_batch(self, names):
             if self.i >= len(self.raw):
                 return None
-            self.batch = prepare(self.raw[self.i]).contiguous()
+            self.batch = self.prepare(self.raw[self.i]).contiguous()
             self.i += 1
             return [self.batch.data_ptr()]
 

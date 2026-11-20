@@ -178,7 +178,7 @@ def _export(args) -> None:
     experiment = training.find_experiment(args.experiment)
     out = export(experiment, Path(args.out) if args.out else None, args.checkpoint,
                  Path(args.calibration) if args.calibration else None, args.calibration_volumes, args.force,
-                 args.voxel_size, tuple(args.origin) if args.origin else None)
+                 args.voxel_size, tuple(args.origin) if args.origin else None, args.reference_scenes)
     print(f"package {out}")
     print(f"time it on this machine's GPU with: heron benchmark {out} --precision fp32 fp16 int8")
 
@@ -308,6 +308,9 @@ def main(argv=None) -> int:
                    help="voxel size of the network's input, when the volumes' attributes do not say it")
     p.add_argument("--origin", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    help="position of voxel [0, 0, 0] from the robot base (m), with --voxel-size")
+    p.add_argument("--reference-scenes", type=int, default=5,
+                   help="calibration volumes also packaged as reference Scenes with their PyTorch maps, "
+                        "against which a robot checks its own engine (default 5)")
 
     p = sub.add_parser("benchmark", help="time a package on a GPU: PyTorch fp32, then TensorRT engines")
     p.add_argument("package", help="package directory, or an experiment (its package)")

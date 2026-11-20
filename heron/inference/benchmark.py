@@ -18,7 +18,7 @@ import yaml
 
 from heron.errors import HeronConfigError
 from heron.inference.engine import PRECISIONS, build, slug
-from heron.inference.package import CONFIG
+from heron.inference.package import CONFIG, REFERENCE, shape_of
 from heron.inference.package import load as load_manifest
 from heron.inference.predictor import PYTORCH, Predictor, load
 from heron.inference.timing import SAMPLES, WARMUP, POOL, DENSITY, machine, time_predictor, volumes
@@ -49,6 +49,20 @@ def agreement(reference, prediction) -> dict:
     return {"max_abs_diff": round(float(diff.max()), 5), "mean_abs_diff": round(float(diff.mean()), 6)}
 
 
+def reference_agreement(package: Path, predictor) -> dict | None:
+    """agreement() over the package's reference Scenes (real ones, unlike the timing pool), worst case."""
+    import h5py
+    import numpy as np
+
+    if not (package / REFERENCE).is_file():
+        return None
+    with h5py.File(package / REFERENCE, "r") as f:
+        diffs = [np.abs(predictor.predict(f["scene"][i].astype(np.float32)) - f["reachability"][i])
+                 for i in range(len(f["scene"]))]
+    return {"scenes": len(diffs), "max_abs_diff": round(float(max(d.max() for d in diffs)), 5),
+            "mean_abs_diff": round(float(np.mean([d.mean() for d in diffs])), 6)}
+
+
 def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: int = WARMUP,
         rebuild: bool = False, log=print) -> dict:
     import torch
@@ -57,7 +71,7 @@ def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: in
     config = yaml.safe_load((package / CONFIG).read_text())
     if not torch.cuda.is_available():
         raise HeronConfigError("no GPU visible: the benchmark times GPU inference")
-    shape = tuple(manifest["input_shape"])
+    shape = shape_of(manifest)
     pool = volumes(shape)
     info = machine(torch)
 
@@ -73,6 +87,7 @@ def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: in
         result = time_predictor(predictor, pool, samples, warmup)
         result["speedup"] = speedup(runs[BASELINE], result)
         result["agreement"] = agreement(reference, predictor.predict(pool[0]))
+        result["agreement_reference_scenes"] = reference_agreement(package, predictor)
         result["engine"] = engine.name
         result["build_seconds"] = round(seconds, 1) if seconds is not None else "cached"
         runs[f"tensorrt_{precision}"] = result
@@ -82,7 +97,7 @@ def run(package: Path, precisions: list[str], samples: int = SAMPLES, warmup: in
         "experiment": manifest["experiment"],
         "checkpoint": manifest["checkpoint"],
         "package": str(package),
-        "input_shape": manifest["input_shape"],
+        "input_shape": list(shape),
         "machine": info,
         "samples": samples,
         "warmup": warmup,
