@@ -17,6 +17,8 @@ it needs:
                                   transform makes of an occupancy Scene)
     grid                          where that input lies around the robot base (voxel size,
                                   origin of voxel [0, 0, 0], in meters)
+    setup                         the Robot and Station it was trained for, and the Robot's base
+                                  link: a program running another robot must refuse the package
     output                        shape and range of the Reachability map
     files                         the ONNX, the reference Scenes, the calibration volumes
 
@@ -199,6 +201,34 @@ def write_reference(path: Path, files: list[Path], shape: tuple, config: dict, c
     return {"scenes": len(files), "computed_with": f"pytorch fp32, TF32 off, on {predictor.device}"}
 
 
+def setup(experiment: Path, robot: str | None = None, station: str | None = None) -> dict | None:
+    """The Robot and Station the network was trained for: from the Experiment's Corpus, else
+    as given (Experiments made before Corpora). None when neither says it.
+
+    A network trained for one robot predicts a plausible map for any Scene: nothing in the
+    input tells another robot apart, so the package has to say it.
+    """
+    from heron.corpus import MANIFEST as CORPUS_MANIFEST, corpus_dir
+    from heron.robot import load_robot
+    from heron.station import load_station
+    from heron.training import read_manifest
+
+    corpus = read_manifest(experiment).get("corpus")
+    path = corpus_dir(corpus) / CORPUS_MANIFEST if corpus else None
+    trained = yaml.safe_load(path.read_text()) if path and path.is_file() else {}
+    for key, given in (("robot", robot), ("station", station)):
+        if given and trained.get(key) and given != trained[key]:
+            raise HeronConfigError(f"{experiment.name} was trained on corpus {corpus!r}, whose {key} is "
+                                   f"{trained[key]!r}, not {given!r}")
+    robot, station = robot or trained.get("robot"), station or trained.get("station")
+    if not robot:
+        return None
+    if station:
+        load_station(station)                   # an unknown name is an error, not a silent string
+    return {"robot": robot, "base_link": load_robot(robot).base_link, "station": station,
+            "source": f"corpus {corpus}" if trained.get("robot") else "given at export"}
+
+
 def grid(files: list[Path], shape: tuple, voxel_size: float | None = None,
          origin: tuple[float, float, float] | None = None) -> dict | None:
     """Where the network's input lies: voxel size and origin (m), the position of voxel [0, 0, 0]
@@ -266,11 +296,12 @@ def _versions() -> dict:
 def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", calibration: Path | None = None,
            samples: int = CALIBRATION_SAMPLES, force: bool = False, voxel_size: float | None = None,
            origin: tuple[float, float, float] | None = None, reference_scenes: int = REFERENCE_SCENES,
-           log=print) -> Path:
+           robot: str | None = None, station: str | None = None, log=print) -> Path:
     """Write the Experiment's package (by default <experiment>/package). Returns its directory.
 
     voxel_size, origin: the grid, for volumes whose attributes do not describe it (see grid()).
     reference_scenes: how many calibration volumes also become reference Scenes.
+    robot, station: what it was trained for, for Experiments without a Corpus (see setup()).
     """
     from heron.training import _git_commit, read_manifest
 
@@ -291,6 +322,10 @@ def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", 
     chosen = pick(list(Path(source).glob("*.h5")), samples)
     input_encoding = encoding(config, shape)
     placement = grid(chosen, shape, voxel_size, origin)
+    trained_for = setup(experiment, robot, station)
+    if trained_for is None:
+        log("setup: the Experiment has no Corpus naming its robot, and no --robot was given: a robot "
+            "will not be able to check that the package was trained for it")
     if placement is None:
         log("grid: the volumes do not say where they lie around the base, and no --voxel-size / --origin "
             "was given: a robot will not be able to check its Scenes against this package")
@@ -318,6 +353,7 @@ def export(experiment: Path, out: Path | None = None, checkpoint: str = "best", 
             "input": {"shape": list(shape), "axes": ["x", "y", "z"], "dtype": "float32",
                       "batch": 1, "channels": 1, "encoding": input_encoding},
             "grid": placement,
+            "setup": trained_for,
             "output": {"shape": list(shape), "dtype": "float32",
                        "activation": "sigmoid" if sigmoid else "none",
                        "range": [0.0, 1.0] if sigmoid else None},

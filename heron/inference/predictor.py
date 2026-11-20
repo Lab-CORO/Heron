@@ -77,19 +77,27 @@ class Predictor:
 
 
 def load(package: Path, precision: str = PYTORCH, gpu: str | None = None, fallback: bool = False,
-         log=print) -> Predictor:
+         robot: str | None = None, log=print) -> Predictor:
     """The package's network at one precision: "pytorch" (its checkpoint), or the cached Engine
     for this GPU and TensorRT version ("fp32", "fp16", "int8").
 
     A missing or unloadable Engine is an error naming the command that builds it, unless
     fallback: then the PyTorch model runs instead, said through log and in predictor.backend.
     gpu: the GPU's name as torch reports it (default: this machine's first GPU).
+    robot: the Robot the caller runs; the package must have been trained for it.
     """
     from heron.inference import package as pkg
     from heron.inference.engine import PRECISIONS, TrtNetwork, check_version, engine_path
 
     package = Path(package)
     manifest = pkg.load(package)
+    if robot is not None:
+        trained = (manifest.get("setup") or {}).get("robot")
+        if trained is None:
+            raise HeronConfigError(f"{package}: the package does not say which robot it was trained for "
+                                   f"(export it again with heron export --force, --robot for an old Experiment)")
+        if trained != robot:
+            raise HeronConfigError(f"{package}: trained for robot {trained!r}, not {robot!r}")
     config = yaml.safe_load((package / pkg.CONFIG).read_text())
     if precision == PYTORCH:
         return Predictor(config, package / pkg.CHECKPOINT, manifest=manifest)

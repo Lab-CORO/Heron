@@ -178,7 +178,8 @@ def _export(args) -> None:
     experiment = training.find_experiment(args.experiment)
     out = export(experiment, Path(args.out) if args.out else None, args.checkpoint,
                  Path(args.calibration) if args.calibration else None, args.calibration_volumes, args.force,
-                 args.voxel_size, tuple(args.origin) if args.origin else None, args.reference_scenes)
+                 args.voxel_size, tuple(args.origin) if args.origin else None, args.reference_scenes,
+                 args.robot, args.station)
     print(f"package {out}")
     print(f"time it on this machine's GPU with: heron benchmark {out} --precision fp32 fp16 int8")
 
@@ -311,6 +312,8 @@ def main(argv=None) -> int:
     p.add_argument("--reference-scenes", type=int, default=5,
                    help="calibration volumes also packaged as reference Scenes with their PyTorch maps, "
                         "against which a robot checks its own engine (default 5)")
+    p.add_argument("--robot", help="robot it was trained for, when the experiment has no corpus saying it")
+    p.add_argument("--station", help="station it was trained for, with --robot")
 
     p = sub.add_parser("benchmark", help="time a package on a GPU: PyTorch fp32, then TensorRT engines")
     p.add_argument("package", help="package directory, or an experiment (its package)")

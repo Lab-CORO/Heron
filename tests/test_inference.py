@@ -82,6 +82,7 @@ def test_export_writes_a_portable_package(tiny_experiment):
     manifest = package.load(out)
     assert manifest["experiment"] == tiny_experiment.name and manifest["checkpoint"] == "best"
     assert manifest["input"]["shape"] == list(SHAPE) and manifest["calibration"]["volumes"] == 3
+    assert manifest["setup"] is None                       # a legacy Experiment: no Corpus, no --robot
     with h5py.File(out / package.CALIBRATION) as f:
         assert f["input"].shape == (3, *SHAPE) and f["input"].dtype == np.float32
     import onnx
@@ -92,6 +93,22 @@ def test_export_writes_a_portable_package(tiny_experiment):
     (out / package.ENGINES).mkdir()
     package.export(tiny_experiment, samples=2, force=True, log=lambda *_: None)
     assert not (out / package.ENGINES).exists() and package.load(out)["calibration"]["volumes"] == 2
+
+
+def test_the_package_names_the_robot_it_was_trained_for(tiny_experiment, tmp_path, monkeypatch):
+    assert package.setup(tiny_experiment) is None                     # no Corpus, nothing given
+    assert package.setup(tiny_experiment, robot="m1013", station="leeloo") == {
+        "robot": "m1013", "base_link": "base_0", "station": "leeloo", "source": "given at export"}
+    with pytest.raises(HeronConfigError):
+        package.setup(tiny_experiment, robot="m1013", station="no_such_station")
+    monkeypatch.setenv("HERON_DATA_ROOT", str(tmp_path))
+    (tmp_path / "corpora" / "c").mkdir(parents=True)
+    (tmp_path / "corpora" / "c" / "corpus.yaml").write_text("robot: ur5e\nstation: bare\n")
+    (tiny_experiment / "experiment.yaml").write_text("corpus: c\n")
+    assert package.setup(tiny_experiment)["robot"] == "ur5e"
+    assert package.setup(tiny_experiment)["source"] == "corpus c"
+    with pytest.raises(HeronConfigError, match="whose robot is 'ur5e'"):
+        package.setup(tiny_experiment, robot="m1013")
 
 
 def test_export_refuses_calibration_volumes_of_another_shape(tiny_experiment, tmp_path):
@@ -341,6 +358,18 @@ def test_benchmark_job_times_the_package_in_the_training_runtime(experiment):
     assert f"python -m heron.inference.benchmark --package {pkg} --precision fp16 int8 --samples 100" in script
     assert f"--results-dir {jobs.results_dir(experiment.name)}" in script
     assert "capa_unet.sif" in script and "--gpus-per-node=1" in script
+
+
+def test_a_program_cannot_load_a_package_trained_for_another_robot(experiment):
+    from heron.inference import load
+    pkg = fake_package(experiment)
+    with pytest.raises(HeronConfigError, match="does not say which robot"):
+        load(pkg, robot="m1013")
+    manifest = yaml.safe_load((pkg / package.MANIFEST).read_text())
+    manifest["setup"] = {"robot": "ur5e", "base_link": "base_link", "station": "bare", "source": "corpus c"}
+    (pkg / package.MANIFEST).write_text(yaml.safe_dump(manifest))
+    with pytest.raises(HeronConfigError, match="trained for robot 'ur5e', not 'm1013'"):
+        load(pkg, robot="m1013")
 
 
 def test_benchmark_takes_an_experiment_or_a_package(experiment, capsys):

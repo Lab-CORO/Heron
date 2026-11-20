@@ -89,9 +89,19 @@ PyTorch's).
 heron export my_run_20261023_1430         # -> <experiment>/package/
 ```
 
-The package holds the config, the checkpoint, `model.onnx` (fp32, at the Corpus crop
-size) and 200 train volumes for int8 calibration. Copy the package directory to the
-other machine (a Jetson, a workstation), then:
+The package holds:
+- the config, the checkpoint and `model.onnx` (fp32, at the Corpus crop size);
+- 200 train volumes for int8 calibration, already encoded;
+- `reference.h5`, with a few Scenes and the maps PyTorch gives them.
+
+Its `manifest.yaml` (format 1) is the contract with the program that runs the network.
+It gives the input shape and axes, the value of a free and of an occupied voxel, the
+grid around the base, the output range, and the Robot and Station it was trained for
+(`setup`). A robot runs a package with TensorRT alone (see `heron_ros`). For an Experiment
+made before Corpora, give what the volumes do not say: `--voxel-size` and `--origin` for
+the grid, `--robot` and `--station` for the setup.
+
+Copy the package directory to the other machine (a Jetson, a workstation), then:
 
 ```bash
 heron benchmark /path/to/package --local                   # fp32 fp16 int8, 1000 volumes
