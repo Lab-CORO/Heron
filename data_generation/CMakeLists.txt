@@ -22,7 +22,6 @@ find_package(rosbag2_interfaces REQUIRED)
 
 find_package(HDF5 REQUIRED COMPONENTS CXX HL)
 find_package(HighFive REQUIRED)
-find_package(Open3D REQUIRED)
 # find_package( REQUIRED)
 
 if(BUILD_TESTING)
@@ -126,8 +125,6 @@ include_directories(
   ${HDF5_INCLUDE_DIRS}
   ${HighFive_INCLUDE_DIRS}
   ${visualization_msgs_INCLUDE_DIRS}
-  ${Open3D_INCLUDE_DIRS}
-  /home/HighFive/include
 )
 
 
