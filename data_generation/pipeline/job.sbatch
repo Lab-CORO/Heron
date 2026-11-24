@@ -80,11 +80,15 @@ if [ "${MODE}" != "create_rm" ] && [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
   DATA_BIND_SRC="${TASK_DIR}"
 fi
 
+mkdir -p "${WARP_CACHE}"
 BINDS=(
   --bind "${DATA_BIND_SRC}":"${CONTAINER_DATA}"
   --bind "${LAUNCH_DIR}":"${CONTAINER_LAUNCH}"
   --bind "${SLURM_TMPDIR}":/tmp
-  --bind "${WARP_CACHE}":/home/willore/.cache/warp
+  # warp (cuRobo's collision kernels) caches what it compiles in ~/.cache/warp. Under -C the
+  # container's HOME is an empty in-memory directory at the host's $HOME path, so mount a
+  # persistent cache there.
+  --bind "${WARP_CACHE}":"${HOME}/.cache/warp"
 )
 
 if [ "${MODE}" = "real" ]; then

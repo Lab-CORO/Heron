@@ -13,10 +13,17 @@
 
 set -e
 
-source /opt/ros/humble/setup.bash
+# The ROS 2 Jazzy + cuRobo v2 image runs every mode but scene; the Humble image is only
+# used for scene (gen_dataset.sh picks, from the image's heron.ros label).
+if [ -f /opt/ros/jazzy/setup.bash ]; then
+  source /opt/ros/jazzy/setup.bash
+  export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST   # ROS_LOCALHOST_ONLY is deprecated in Jazzy
+else
+  source /opt/ros/humble/setup.bash
+  export ROS_LOCALHOST_ONLY=1
+fi
 source /home/ros2_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_LOCALHOST_ONLY=1
 
 DATA_SHARE=/home/ros2_ws/install/data_generation/share/data_generation/data
 
