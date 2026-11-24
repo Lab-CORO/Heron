@@ -4,6 +4,7 @@
 # to an Apptainer .sif. Non-interactive; amd64 only. See docs/images.md, "Generation image".
 #
 #   images/generation/build.sh [--out DIR] [--heron-commit SHA] [--skip-base] [--skip-sif] [--base-only]
+#                              [--low-disk] [--from-image heron_data_generation_jazzy:<tag>]
 #
 # Steps:
 #   1. clone Lab-CORO/curobo_ros at CUROBO_ROS_COMMIT;
@@ -11,6 +12,9 @@
 #      below, as curobo_ros:jazzy-<commit>;
 #   3. build images/generation/Dockerfile on top of it (Heron's data_generation);
 #   4. apptainer build --fakeroot <out>/heron_data_generation_jazzy.sif docker-daemon://…
+#      That needs about three times the image size free (~90 GB); --low-disk converts with
+#      docker2sif.sh instead (about twice the squashfs, ~25 GB). --from-image skips 1-3 and
+#      converts an image already built.
 #
 # Environment (all optional):
 #   OUT_DIR / --out        work and output directory          (default /var/tmp/heron-build)
@@ -69,6 +73,8 @@ HERON_COMMIT="${HERON_COMMIT:-}"
 SKIP_BASE=0
 SKIP_SIF=0
 BASE_ONLY=0
+LOW_DISK=0
+FROM_IMAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)          OUT_DIR="$2"; shift 2;;
@@ -76,7 +82,9 @@ while [ $# -gt 0 ]; do
     --skip-base)    SKIP_BASE=1; shift;;     # reuse an existing curobo_ros:jazzy-<commit>
     --skip-sif)     SKIP_SIF=1; shift;;
     --base-only)    BASE_ONLY=1; SKIP_SIF=1; shift;;   # stop after the base image
-    -h|--help)      sed -n '2,22p' "$0"; exit 0;;
+    --low-disk)     LOW_DISK=1; shift;;
+    --from-image)   FROM_IMAGE="$2"; shift 2;;
+    -h|--help)      sed -n '2,27p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -86,16 +94,16 @@ die() { echo "build.sh: $*" >&2; exit 1; }
 command -v docker >/dev/null || die "docker not found"
 [ "$SKIP_SIF" = 1 ] || command -v apptainer >/dev/null || die "apptainer not found"
 
-if [ "$BASE_ONLY" = 1 ]; then
+if [ "$BASE_ONLY" = 1 ] || [ -n "$FROM_IMAGE" ]; then
   HERON_COMMIT=0000000000000000000000000000000000000000   # unused
 elif [ -z "$HERON_COMMIT" ]; then
   [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] || die "uncommitted changes in $REPO_ROOT: commit them (the image clones a pushed commit)"
   HERON_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 fi
-[ "$BASE_ONLY" = 1 ] || [[ "$HERON_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "HERON_COMMIT must be a full 40-character SHA, got '$HERON_COMMIT'"
+[ "$BASE_ONLY" = 1 ] || [ -n "$FROM_IMAGE" ] || [[ "$HERON_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "HERON_COMMIT must be a full 40-character SHA, got '$HERON_COMMIT'"
 # The image clones this commit from HERON_REPO: fail now, not 30 minutes into the build.
 probe="$(mktemp -d)"
-if [ "$BASE_ONLY" = 0 ] && ! { git -C "$probe" init -q && git -C "$probe" fetch -q --depth 1 "$HERON_REPO" "$HERON_COMMIT" 2>/dev/null; }; then
+if [ "$BASE_ONLY" = 0 ] && [ -z "$FROM_IMAGE" ] && ! { git -C "$probe" init -q && git -C "$probe" fetch -q --depth 1 "$HERON_REPO" "$HERON_COMMIT" 2>/dev/null; }; then
   rm -rf "$probe"; die "commit $HERON_COMMIT is not on $HERON_REPO (push it first)"
 fi
 rm -rf "$probe"
@@ -106,9 +114,11 @@ LOG_DIR="$OUT_DIR/logs"; mkdir -p "$LOG_DIR"
 BASE_TAG="curobo_ros:jazzy-${CUROBO_ROS_COMMIT:0:7}"
 BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 IMAGE_TAG="${IMAGE_NAME}:$(date -u +%Y%m%d)-${HERON_COMMIT:0:7}"
+[ -z "$FROM_IMAGE" ] || IMAGE_TAG="$FROM_IMAGE"
 echo "== Heron generation image: $IMAGE_TAG (base $BASE_TAG), work dir $OUT_DIR"
 
 # ---- 1-2. Base image: curobo_ros's Jazzy recipe, pinned ------------------------------
+if [ -z "$FROM_IMAGE" ]; then
 if [ "$SKIP_BASE" = 0 ]; then
   SRC="$OUT_DIR/src/curobo_ros"
   rm -rf "$SRC"; mkdir -p "$SRC"
@@ -166,6 +176,7 @@ docker build --platform linux/amd64 --progress=plain \
   --label heron.built="$BUILT" \
   "$HERE" 2>&1 | tee "$LOG_DIR/heron.log"
 docker tag "$IMAGE_TAG" "${IMAGE_NAME}:latest"
+fi   # FROM_IMAGE
 
 # ---- 4. Apptainer -----------------------------------------------------------------
 if [ "$SKIP_SIF" = 0 ]; then
@@ -174,7 +185,11 @@ if [ "$SKIP_SIF" = 0 ]; then
   mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
   SIF="$OUT_DIR/${IMAGE_NAME}.sif"
   echo "== Converting to $SIF"
-  apptainer build --force --fakeroot "$SIF" "docker-daemon://${IMAGE_TAG}" 2>&1 | tee "$LOG_DIR/sif.log"
+  if [ "$LOW_DISK" = 1 ]; then
+    "$HERE/docker2sif.sh" "$IMAGE_TAG" "$SIF" "$APPTAINER_TMPDIR/docker2sif" 2>&1 | tee "$LOG_DIR/sif.log"
+  else
+    apptainer build --force --fakeroot "$SIF" "docker-daemon://${IMAGE_TAG}" 2>&1 | tee "$LOG_DIR/sif.log"
+  fi
   ls -lh "$SIF"
   apptainer inspect --labels "$SIF" | grep '^heron\.' || die "no heron.* label in $SIF"
 fi
