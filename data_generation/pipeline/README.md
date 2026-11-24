@@ -12,7 +12,7 @@ data_generation/pipeline/
   run_generation.sh   # in-container launcher (staged into the data dir)
   split_scenes.py     # (scene mode) host-side: scenes.h5 -> one .npz per scene
   load_scene.py       # (scene mode) in-container: inject scene into curobo, trigger RM
-  curobo_patch/       # curobo_ros files bind-mounted over the .sif's copies (see its README)
+  curobo_patch/       # (scene mode, Humble image) curobo_ros files bind-mounted over the .sif's copies
   verify_voxel_esdf.py / .sbatch   # one-off GPU check of the native ESDF path
 ```
 
@@ -85,6 +85,20 @@ picks the right `ros2 launch` for the mode and forwards `robot_config_file`,
 + `bag_file`). Output HDF5 is written by `data_generator.cpp` into the bound output
 directory.
 
+**Which image.** `--sif` (default `docker_images/data_generation.sif`) is the generation
+image, read by its labels (`docs/images.md`, "Generation image"):
+
+- the ROS 2 Jazzy + cuRobo v2 image (`heron.ros=jazzy`, built by
+  `images/generation/build.sh`) runs `real`, `synthetic` and `create_rm`. The launch files
+  start curobo_ros as `unified_planner`, give it the Station's Scene cube
+  (`mapper_extent_xyz`), and nothing is patched;
+- the older ROS 2 Humble + cuRobo v1 image (no `heron.*` label) is only accepted for `scene`,
+  which is not ported yet, with `curobo_patch/` mounted over it.
+
+The launch dir is mounted from this checkout, so the checkout and the image must match:
+an image built from this branch, launched from an older checkout, would start `curobo_ik`,
+which no longer exists.
+
 ## Real mode: camera calibration via TF
 
 The camera pose is resolved from the rosbag's **TF tree** (the camera moved between
@@ -98,14 +112,12 @@ recordings, so the old hardcoded extrinsics are not reused):
 - `generate_real_data.launch.py` replays `/tf` and `/tf_static` (in addition to the
   two `/masked_depth_image/*` topics) so the lookup resolves.
 
-> **Base frame.** `camera_depth_map_strategy.py` looks up the transform against a frame
-> literally named **`base_link`**. For **leeloo** this is fine: `base_link` and the IK
-> base `base_0` are coincident frames, so the camera pose is correct. For a **different
-> robot** where `base_link` does **not** coincide with the curobo robot base, the
-> reconstructed obstacles would be offset — in that case make the camera lookup use the
-> robot's base (bind-override `camera_depth_map_strategy.py`). Either way, run a
-> **single test task first** (`--array 1`, small `--dataset-size`) and check the
-> obstacle/scene alignment in the output HDF5 before launching the full array.
+> **Base frame.** With the Jazzy image, `camera_depth_map_strategy.py` looks the camera up
+> against curobo_ros's `base_link` parameter (the robot base, `base_0` for leeloo), no longer
+> against a frame literally named `base_link`. Either way, run a **single test task first**
+> (`--array 1`, small `--dataset-size`) and check the obstacle/scene alignment in the output
+> HDF5 before launching the full array. The real mode has not been run with the Jazzy image
+> yet: no rosbag was at hand when it was ported.
 
 ## Scene mode: RMs for scenes you already have
 
