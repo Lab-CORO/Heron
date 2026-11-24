@@ -100,7 +100,8 @@ with h5py.File(path, "r") as f:
 print(path); print("  voxel_grid", vg.shape, "occupied", int((vg > 0).sum()), "attrs", attrs)
 print("  reachability_map", rm.shape, "min", rm.min(), "max", rm.max(), "non-zero", int((rm > 0).sum()))
 ok = vg.shape == (n, n, n) and rm.shape == (n, n, n)
-ok &= 0.0 <= rm.min() and rm.max() <= 1.0 and 0.0 <= vg.min() and vg.max() <= 1.0 and (rm > 0).any()
+eps = 1e-9   # a voxel reachable in all 50 orientations sums 50 x 1/50 = 1.0000000000000004
+ok &= -eps <= rm.min() and rm.max() <= 1 + eps and 0.0 <= vg.min() and vg.max() <= 1.0 and (rm > 0).any()
 print("OK" if ok else f"FAILED (expected {n}^3, values in [0, 1], a non-empty map)")
 sys.exit(0 if ok else 1)
 '
