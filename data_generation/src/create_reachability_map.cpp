@@ -24,6 +24,8 @@
 #include "../include/utils.h"
 
 #include "curobo_msgs/srv/ik_batch.hpp"
+#include "curobo_msgs/srv/warmup_ik.hpp"
+#include "../include/curobo_node.h"
 
 
 typedef std::multimap<const std::vector<double> *, const std::vector<double> *> MultiMapPtr;
@@ -85,7 +87,9 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
     auto node = rclcpp::Node::make_shared("create_reachability_map");
 
-    rclcpp::Client<curobo_msgs::srv::IkBatch>::SharedPtr client_ik = node->create_client<curobo_msgs::srv::IkBatch>("/curobo_ik/ik_batch_poses", rmw_qos_profile_services_default);
+    const std::string curobo = curobo_node::declare(*node);
+    rclcpp::Client<curobo_msgs::srv::IkBatch>::SharedPtr client_ik = node->create_client<curobo_msgs::srv::IkBatch>(curobo_node::service(curobo, "ik_batch"), rmw_qos_profile_services_default);
+    rclcpp::Client<curobo_msgs::srv::WarmupIK>::SharedPtr client_warmup_ik = node->create_client<curobo_msgs::srv::WarmupIK>(curobo_node::service(curobo, "warmup_ik"), rmw_qos_profile_services_default);
     // wait for the service up
     while (!client_ik->wait_for_service(5s))
     {
@@ -188,6 +192,28 @@ int main(int argc, char **argv)
     node->get_parameter("batch_size", batch_size);
     utils::split_data(reachability_poses, batch_size, batches);
     RCLCPP_INFO(node->get_logger(), "numbre de batch: %d", batches.size());
+
+    // curobo_ros v2 builds its IK solver only on warmup_ik, and rebuilds it for a batch of
+    // another size: warm it up once for batch_size, and pad the last batch (below).
+    {
+        while (!client_warmup_ik->wait_for_service(5s))
+        {
+            if (!rclcpp::ok())
+            {
+                return 1;
+            }
+            RCLCPP_INFO(node->get_logger(), "%s not available, waiting again...", client_warmup_ik->get_service_name());
+        }
+        auto warmup = std::make_shared<curobo_msgs::srv::WarmupIK::Request>();
+        warmup->batch_size = batch_size;
+        auto warmup_future = client_warmup_ik->async_send_request(warmup);
+        if (rclcpp::spin_until_future_complete(node, warmup_future) != rclcpp::FutureReturnCode::SUCCESS ||
+            !warmup_future.get()->success)
+        {
+            RCLCPP_ERROR(node->get_logger(), "IK warmup failed");
+            return 1;
+        }
+    }
     progressbar bar(batches.size());
     int progresse_index = 0;
     for (const auto &batch : batches)
@@ -204,21 +230,31 @@ int main(int argc, char **argv)
         auto request = std::make_shared<curobo_msgs::srv::IkBatch::Request>();
 
         request->poses = batch;
+        // Pad to batch_size with copies of the last pose (ignored below), see the warmup above.
+        while ((int)request->poses.size() < batch_size)
+        {
+            request->poses.push_back(batch.back());
+        }
         auto result_future = client_ik->async_send_request(request);
 
         if (rclcpp::spin_until_future_complete(node, result_future) == rclcpp::FutureReturnCode::SUCCESS)
         {
             auto res = result_future.get();
+            if (!res->success || res->joint_states_valid.size() < batch.size())
+            {
+                RCLCPP_ERROR(node->get_logger(), "Ik batch failed: %s", res->error_msg.data.c_str());
+                return 1;
+            }
             joint_states = res->joint_states;
             joint_states_valid = res->joint_states_valid;
         }
         else
         {
             RCLCPP_ERROR(node->get_logger(), "Service call failed");
-            return false;
+            return 1;
         }
 
-        for (int j = 0; j < joint_states.size(); j++)
+        for (size_t j = 0; j < batch.size(); j++)
         {
             if (joint_states_valid[j].data)
             {              

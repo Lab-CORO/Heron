@@ -19,6 +19,7 @@ find_package (Eigen3 REQUIRED)
 find_package(curobo_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(rosbag2_interfaces REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 find_package(HDF5 REQUIRED COMPONENTS CXX HL)
 find_package(HighFive REQUIRED)
@@ -64,7 +65,7 @@ target_link_libraries(create_reachability_map
                     )
 #ament_target_dependencies(create_reachability_map rclcpp ${OCTOMAP_LIBRARIES} geometry_msgs tf2_geometry_msgs pcl_ros Eigen3)
 
-ament_target_dependencies(create_reachability_map rclcpp geometry_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3)
+ament_target_dependencies(create_reachability_map rclcpp geometry_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3 ament_index_cpp)
 
 add_executable(generate_data
         src/data_generator.cpp
@@ -77,7 +78,7 @@ add_executable(generate_data
 )
 target_include_directories(generate_data PUBLIC ${OCTOMAP_INCLUDE_DIRS})
 target_link_libraries(generate_data ${OCTOMAP_LIBRARIES})
-ament_target_dependencies(generate_data rclcpp std_srvs geometry_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3)
+ament_target_dependencies(generate_data rclcpp std_srvs geometry_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3 ament_index_cpp)
 # Lier les bibliothèques nécessaires
 target_link_libraries(generate_data
   ${rclcpp_LIBRARIES}
@@ -100,7 +101,7 @@ target_link_libraries(reachability_map_viz
   ${HighFive_LIBRARIES}
   )
 
-ament_target_dependencies(reachability_map_viz rclcpp geometry_msgs visualization_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3)
+ament_target_dependencies(reachability_map_viz rclcpp geometry_msgs visualization_msgs curobo_msgs tf2_geometry_msgs pcl_ros Eigen3 ament_index_cpp)
 
 # Add executable for scene manager
 add_executable(scene_manager

@@ -1,6 +1,7 @@
 // this class create a scene to curobo, check the collisions and launch the data generator. it save the scene to a file near the data generator
 
 #include "../include/obstacle_adder.h"
+#include "../include/curobo_node.h"
 
 ObstacleAdder::ObstacleAdder() : Node("obstacle_adder")
 {
@@ -10,12 +11,13 @@ ObstacleAdder::ObstacleAdder() : Node("obstacle_adder")
     client_cb_remove_all = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     client_cb_collision = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-    // Création du client pour le service "add_obstacle"
-    client_add_obj = this->create_client<curobo_msgs::srv::AddObject>("/curobo_ik/add_object", rmw_qos_profile_services_default, client_cb_add_obj);
-    client_remove_all_obj = this->create_client<std_srvs::srv::Trigger>("/curobo_ik/remove_all_objects", rmw_qos_profile_services_default, client_cb_remove_all); // trigger
+    // Clients of the cuRobo node (parameter curobo_node, default unified_planner)
+    const std::string curobo = curobo_node::declare(*this);
+    client_add_obj = this->create_client<curobo_msgs::srv::AddObject>(curobo_node::service(curobo, "add_object"), rmw_qos_profile_services_default, client_cb_add_obj);
+    client_remove_all_obj = this->create_client<std_srvs::srv::Trigger>(curobo_node::service(curobo, "remove_all_objects"), rmw_qos_profile_services_default, client_cb_remove_all); // trigger
 
-    client_get_collision_dist = this->create_client<curobo_msgs::srv::GetCollisionDistance>("/curobo_ik/get_collision_distance", rmw_qos_profile_services_default, client_cb_collision);
-    client_remove_obj = this->create_client<curobo_msgs::srv::RemoveObject>("/curobo_ik/remove_object", rmw_qos_profile_services_default, client_cb_rm_obj);
+    client_get_collision_dist = this->create_client<curobo_msgs::srv::GetCollisionDistance>(curobo_node::service(curobo, "get_collision_distance"), rmw_qos_profile_services_default, client_cb_collision);
+    client_remove_obj = this->create_client<curobo_msgs::srv::RemoveObject>(curobo_node::service(curobo, "remove_object"), rmw_qos_profile_services_default, client_cb_rm_obj);
 
     // Attendre que le service soit disponible
     while (!client_get_collision_dist->wait_for_service(std::chrono::seconds(5)))
@@ -64,8 +66,18 @@ bool ObstacleAdder::is_in_forbidden_zone()
     {
 
         auto response = result_future.get();
-        // dillate the response
-        if (response->data[0] > -0.05) // >0 in collision so >-0.05 to keep a safe
+        if (response->data.empty())
+        {
+            // curobo_ros answers an empty list when it has no solver to query (planner not warmed up)
+            RCLCPP_ERROR(this->get_logger(), "get_collision_distance returned no sphere");
+            return false;
+        }
+        // cuRobo v2 returns a collision cost per robot sphere, >= 0: it is > 0 when the
+        // sphere is closer than collision_activation_distance to an obstacle, 0 otherwise.
+        // The launch files set that distance to 0.05 m on the cuRobo node, so `> 0` keeps
+        // the 5 cm margin of the Humble check (signed distance > -0.05 m). Like that check,
+        // only the first sphere is looked at.
+        if (response->data[0] > 0.0)
         {
             return false;
         }
@@ -122,8 +134,17 @@ bool ObstacleAdder::add_random_cubes(int nb_object, float max_reach)
         // Générer une position aléatoire en évitant la zone interdite
         double x, y, z;
         bool cube_is_accepted = false;
+        int attempts = 0;
         do
         {
+            // Bounded: a collision check that always fails (service down, empty answer)
+            // must end the Scene, not spin forever.
+            if (++attempts > kMaxAttemptsPerCube)
+            {
+                RCLCPP_ERROR(this->get_logger(), "cube_%d: no free position after %d attempts, giving up on this Scene",
+                             i, kMaxAttemptsPerCube);
+                return false;
+            }
             x = this->position_dist_(rng_);
             y = this->position_dist_(rng_);
             z = this->position_dist_(rng_);
@@ -208,7 +229,7 @@ bool ObstacleAdder::add_random_cubes(int nb_object, float max_reach)
                 }
                 else
                 {
-                    RCLCPP_ERROR(this->get_logger(), "Échec de l'appel au service add_obstacle pour l'obstacle '%s'", request->name.c_str());
+                    RCLCPP_ERROR(this->get_logger(), "Échec de l'appel au service remove_object pour l'obstacle '%s'", request->name.c_str());
                 }
             }
         } while (!cube_is_accepted);
@@ -223,6 +244,10 @@ int main(int argc, char **argv)
 
     // Création du nœud
     auto obstacle_adder_node = std::make_shared<ObstacleAdder>();
+    if (!curobo_node::wait_until_ready(obstacle_adder_node, obstacle_adder_node->get_parameter("curobo_node").as_string()))
+    {
+        return 1;
+    }
 
     // Création de l'executor
     rclcpp::executors::MultiThreadedExecutor executor;

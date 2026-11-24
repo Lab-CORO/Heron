@@ -40,6 +40,7 @@ private:
     
 
     bool is_in_forbidden_zone();
+    static constexpr int kMaxAttemptsPerCube = 1000;
 };
 
 #endif // OBSTACLE_ADDER_HPP
