@@ -19,15 +19,17 @@
 # Expected environment (exported by gen_dataset.sh):
 #   MODE, VOXEL, DATASET_SIZE, BATCH_SIZE, INIT_BATCH_SIZE, OBJ_MAX, REACH_MAX,
 #   ROBOT_CONFIG_FILE, BASE_LINK, WORLD_FILE, CAMERA_FRAME
-#   HERON_SCENE_HALF_EXTENT  station scene half extent (m), read by the patched obstacle_manager.py
+#   HERON_SCENE_HALF_EXTENT  station scene half extent (m), read by the launch files (Jazzy image)
+#                    or by the patched obstacle_manager.py (Humble image)
+#   HERON_IMAGE      jazzy | humble: which generation image SIF is (gen_dataset.sh reads its labels)
 #   ROBOT_CONFIG_BIND  host dir of a robot config that is not built into the image (may be empty)
 #   DATA_DIR         host dir bound to .../share/data_generation/data (assets + output)
 #   LAUNCH_DIR       host dir bound to .../share/data_generation/launch (parametrized launches)
 #   SIF              path to data_generation.sif
 #   WARP_CACHE       host warp cache dir
 #   ROSBAG_DIR       (real only) host rosbag directory to stage to local SSD
-#   CUROBO_PATCH_DIR host dir with obstacle_manager.py / ros_service_manager.py, bind-mounted
-#                    over curobo_ros's installed copies without rebuilding the .sif.
+#   CUROBO_PATCH_DIR (Humble image only) host dir with obstacle_manager.py / ros_service_manager.py,
+#                    bind-mounted over curobo_ros's installed copies without rebuilding the .sif.
 #                    See pipeline/curobo_patch/README.md.
 
 module load apptainer
@@ -97,16 +99,22 @@ if [ "${MODE}" = "real" ]; then
   BINDS+=( --bind "${SLURM_TMPDIR}/rosbag":/home/ros2_ws/rosbag )
 fi
 
-# curobo_ros files patched without rebuilding the image (see curobo_patch/README.md).
-# obstacle_manager.py reads the station's scene extent (HERON_SCENE_HALF_EXTENT), so
-# every mode needs it; ros_service_manager.py only adds the scene-mode service.
-CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
-PATCHED=( obstacle_manager.py )
-[ "${MODE}" = "scene" ] && PATCHED+=( ros_service_manager.py )
-for f in "${PATCHED[@]}"; do
-  [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
-  BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
-done
+# Humble image only: curobo_ros files patched without rebuilding the image (see
+# curobo_patch/README.md). obstacle_manager.py reads the station's scene extent
+# (HERON_SCENE_HALF_EXTENT); ros_service_manager.py adds the scene-mode service.
+# The Jazzy image needs no patch: the launch files pass the extent to curobo_ros.
+if [ "${HERON_IMAGE:-}" = "humble" ]; then
+  CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
+  PATCHED=( obstacle_manager.py )
+  [ "${MODE}" = "scene" ] && PATCHED+=( ros_service_manager.py )
+  for f in "${PATCHED[@]}"; do
+    [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
+    BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
+  done
+elif [ "${HERON_IMAGE:-}" != "jazzy" ]; then
+  echo "ERROR: HERON_IMAGE='${HERON_IMAGE:-}' (expected jazzy or humble; submit through gen_dataset.sh)" >&2
+  exit 1
+fi
 # A robot whose curobo config lives on the host: mount its directory (config, URDF,
 # meshes) at the same path, so absolute paths inside the config keep working.
 if [ -n "${ROBOT_CONFIG_BIND:-}" ]; then
