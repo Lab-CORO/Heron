@@ -4,7 +4,7 @@ curobo_ros (ROS 2 Jazzy, cuRobo v2) is started as `unified_planner`; create_reac
 calls its ik_batch service through the `curobo_node` parameter.
 """
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -49,6 +49,8 @@ def generate_launch_description():
             executable='create_reachability_map',
             name='create_reachability_map',
             output='screen',
+            # End the launch once the master map is written (the cuRobo node would stay up).
+            on_exit=Shutdown(),
             parameters=[{
                 'curobo_node': CUROBO_NODE,
                 'voxel_size': ParameterValue(voxel_size, value_type=float),
