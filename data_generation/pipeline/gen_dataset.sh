@@ -155,13 +155,14 @@ if [[ "$ARRAY" == *-* ]]; then ARRAY_SPEC="$ARRAY"; else ARRAY_SPEC="1-${ARRAY}"
 # Per-task memory (GB). job.sbatch used a flat 60G for every mode, which measured
 # ~10x actual usage on mode=scene (6.3 GB observed). Default per mode instead, with
 # --mem as an escape hatch; synthetic/scene are curobo_ik+generate_data (measured
-# low), real additionally buffers rosbag/camera data, create_rm builds the full
-# IK database over the whole voxel grid (heaviest, unmeasured -> stays conservative).
+# low), real additionally buffers rosbag/camera data. create_rm streams its poses to the
+# IK (measured at 0.02: 1.3 GB early on, ~3.4 GB of reachable poses kept by the end, plus
+# ~2 GB for the cuRobo node); 16 GB leaves twice that.
 if [ -z "$MEM" ]; then
   case "$MODE" in
     scene|synthetic) MEM=16 ;;
     real)             MEM=32 ;;
-    create_rm)        MEM=40 ;;
+    create_rm)        MEM=16 ;;
     *)                MEM=16 ;;
   esac
 fi

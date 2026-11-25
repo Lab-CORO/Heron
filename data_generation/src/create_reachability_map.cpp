@@ -127,71 +127,43 @@ int main(int argc, char **argv)
      float radius = 0.0001; // size of the sphere that represent the voxel (really small, we want a point)
     octomap::point3d origin = octomap::point3d(0, 0, 0); // This point will be the base of the robot
     octomap::OcTree *tree = sd.generateBoxTree(origin, r, resolution);
-    std::vector<octomap::point3d> new_data;
-    std::vector<geometry_msgs::msg::Pose> reachability_poses;
     RCLCPP_INFO(node->get_logger(), "Creating the box and discretizing with resolution: %f", resolution);
-    int sphere_count = 0;
+
+    // The poses (50 orientations per voxel: 406 M at 0.02 for a 2 m reach) are generated and
+    // sent to the IK one batch at a time. Building them all first took ~30 GB, plus a copy
+    // into batches, and the job ran out of memory before its first batch.
+    std::vector<geometry_msgs::msg::Pose> poses_sphere;
+    size_t n_spheres = 0;
     for (octomap::OcTree::leaf_iterator it = tree->begin_leafs(max_depth), end = tree->end_leafs(); it != end; ++it)
     {
-        sphere_count++;
-    }
-    new_data.reserve(sphere_count);
-
-   
-
-    for (octomap::OcTree::leaf_iterator it = tree->begin_leafs(max_depth), end = tree->end_leafs(); it != end; ++it)
-    {
-        // new_data.push_back(it.getCoordinate());
-        static std::vector<geometry_msgs::msg::Pose> poses_sphere;
-        std::vector<double> sphere_coord;
-        sd.convertPointToVector(it.getCoordinate(), sphere_coord);
-        // create a sphere in the master_ik_data
-        geometry_msgs::msg::Point sphere;
-        sphere.x = utils::round_to_decimals(sphere_coord[0], 4);
-        sphere.y = utils::round_to_decimals(sphere_coord[1], 4);
-        sphere.z = utils::round_to_decimals(sphere_coord[2], 4);
-
-        // create poses of spheres exit 50 poses around a sphere pose with a raduis
-        sd.make_sphere_poses(sphere, radius, poses_sphere);
-        for (std::vector<geometry_msgs::msg::Pose>::iterator it_pose = poses_sphere.begin(); it_pose != poses_sphere.end(); ++it_pose) {
-          // the spheres_poses to poses
-          reachability_poses.push_back(*it_pose);
+        if (n_spheres == 0)
+        {
+            geometry_msgs::msg::Point probe;
+            sd.make_sphere_poses(probe, radius, poses_sphere);
         }
+        n_spheres++;
     }
-
-    RCLCPP_INFO(node->get_logger(), "Total no of spheres now: %lu", reachability_poses.size());
+    const size_t poses_per_sphere = poses_sphere.size();
+    const size_t n_poses = n_spheres * poses_per_sphere;
+    RCLCPP_INFO(node->get_logger(), "Total no of spheres now: %lu (%lu poses)", n_spheres, n_poses);
     RCLCPP_INFO(node->get_logger(),
                 "Please hold ON. Spheres are discretized and all of the poses are checked for Ik solutions. May take some "
                 "time");
-
-    // A sphere is created in every voxel. The sphere may be created by default or other techniques.
-    // TODO Other techniques need to be modified. the user can specifiy which technique they want to use
-    // TODO The sphere discretization parameter and rotation of every poses will be taken as argument. If the final
-    // joints can rotate (0, 2pi) we dont need to rotate the poses.
-    // Every discretized points on spheres are converted to pose and all the poses are saved in a multimap with their
-    // corresponding sphere centers
-    // If the resolution is 0.01 the programs not responds
-    // TODO seperate raduise and resolutiion
-
-    VectorOfVectors sphere_coord;
-    sphere_coord.resize(new_data.size());
-
-    MultiVector pose_col;
-    pose_col.reserve(new_data.size() * 50);
-    
 
     // vector of 7d to save with cnpy
     std::vector<geometry_msgs::msg::Pose> poses_vector2save;
     std::map<utils::QuantizedPoint3D, double> map_rm;
 
-    // Split datas to max_batch_size
-    std::vector<std::vector<geometry_msgs::msg::Pose>> batches;
-    // Set  batch_size as ros param
     int batch_size = 0;
     node->declare_parameter("batch_size", 1000);
     node->get_parameter("batch_size", batch_size);
-    utils::split_data(reachability_poses, batch_size, batches);
-    RCLCPP_INFO(node->get_logger(), "numbre de batch: %d", batches.size());
+    if (batch_size <= 0)
+    {
+        RCLCPP_ERROR(node->get_logger(), "batch_size must be > 0");
+        return 1;
+    }
+    const size_t n_batches = (n_poses + batch_size - 1) / batch_size;
+    RCLCPP_INFO(node->get_logger(), "numbre de batch: %lu", n_batches);
 
     // curobo_ros v2 builds its IK solver only on warmup_ik, and rebuilds it for a batch of
     // another size: warm it up once for batch_size, and pad the last batch (below).
@@ -214,57 +186,75 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    progressbar bar(batches.size());
-    int progresse_index = 0;
-    for (const auto &batch : batches)
+
+    progressbar bar(n_batches);
+    size_t progresse_index = 0;
+    // IK of `batch` (at most batch_size poses); its reachable poses go to the master map.
+    auto solve_batch = [&](std::vector<geometry_msgs::msg::Pose> &batch) -> bool
     {
-        RCLCPP_INFO_STREAM(node->get_logger(), "Progress: " << generateProgressBar(progresse_index, batches.size()));
-        progresse_index ++;
+        RCLCPP_INFO_STREAM(node->get_logger(), "Progress: " << generateProgressBar(progresse_index, n_batches));
+        progresse_index++;
         bar.update();
 
-
-        // send all the 50 poses to curobo
-        std::vector<sensor_msgs::msg::JointState> joint_states;
-        std::vector<std_msgs::msg::Bool> joint_states_valid;
-
+        const size_t n = batch.size();
         auto request = std::make_shared<curobo_msgs::srv::IkBatch::Request>();
-
-        request->poses = batch;
+        request->poses = std::move(batch);
         // Pad to batch_size with copies of the last pose (ignored below), see the warmup above.
-        while ((int)request->poses.size() < batch_size)
-        {
-            request->poses.push_back(batch.back());
-        }
+        request->poses.resize(batch_size, request->poses.back());
         auto result_future = client_ik->async_send_request(request);
-
-        if (rclcpp::spin_until_future_complete(node, result_future) == rclcpp::FutureReturnCode::SUCCESS)
-        {
-            auto res = result_future.get();
-            if (!res->success || res->joint_states_valid.size() < batch.size())
-            {
-                RCLCPP_ERROR(node->get_logger(), "Ik batch failed: %s", res->error_msg.data.c_str());
-                return 1;
-            }
-            joint_states = res->joint_states;
-            joint_states_valid = res->joint_states_valid;
-        }
-        else
+        if (rclcpp::spin_until_future_complete(node, result_future) != rclcpp::FutureReturnCode::SUCCESS)
         {
             RCLCPP_ERROR(node->get_logger(), "Service call failed");
-            return 1;
+            return false;
         }
-
-        for (size_t j = 0; j < batch.size(); j++)
+        auto res = result_future.get();
+        if (!res->success || res->joint_states_valid.size() < n)
         {
-            if (joint_states_valid[j].data)
-            {              
-                utils::QuantizedPoint3D pt(batch[j].position.x, batch[j].position.y, batch[j].position.z, resolution);
+            RCLCPP_ERROR(node->get_logger(), "Ik batch failed: %s", res->error_msg.data.c_str());
+            return false;
+        }
+        for (size_t j = 0; j < n; j++)
+        {
+            if (res->joint_states_valid[j].data)
+            {
+                const auto &pose = request->poses[j];
+                utils::QuantizedPoint3D pt(pose.position.x, pose.position.y, pose.position.z, resolution);
                 // save the pose in vector
-                poses_vector2save.push_back(batch[j]);
+                poses_vector2save.push_back(pose);
                 map_rm[pt] += 1.0 / 50.0;
             }
         }
+        batch.clear();
+        batch.reserve(batch_size);
+        return true;
+    };
 
+    std::vector<geometry_msgs::msg::Pose> batch;
+    batch.reserve(batch_size);
+    for (octomap::OcTree::leaf_iterator it = tree->begin_leafs(max_depth), end = tree->end_leafs(); it != end; ++it)
+    {
+        std::vector<double> sphere_coord;
+        sd.convertPointToVector(it.getCoordinate(), sphere_coord);
+        // create a sphere in the master_ik_data
+        geometry_msgs::msg::Point sphere;
+        sphere.x = utils::round_to_decimals(sphere_coord[0], 4);
+        sphere.y = utils::round_to_decimals(sphere_coord[1], 4);
+        sphere.z = utils::round_to_decimals(sphere_coord[2], 4);
+
+        // create poses of spheres exit 50 poses around a sphere pose with a raduis
+        sd.make_sphere_poses(sphere, radius, poses_sphere);
+        for (const auto &pose : poses_sphere)
+        {
+            batch.push_back(pose);
+            if ((int)batch.size() == batch_size && !solve_batch(batch))
+            {
+                return 1;
+            }
+        }
+    }
+    if (!batch.empty() && !solve_batch(batch))
+    {
+        return 1;
     }
     RCLCPP_INFO(node->get_logger(), "Compute finish, saving");
     // save vector to cnpy to the data file in data_generation ros package
