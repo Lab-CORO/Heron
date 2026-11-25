@@ -18,6 +18,8 @@
 #
 # Environment (all optional):
 #   OUT_DIR / --out        work and output directory          (default /var/tmp/heron-build)
+#   HERON_REPO, CUROBO_ROS_REPO  repositories the image clones Heron and curobo_ros from: a URL,
+#                          or a local checkout for commits not pushed yet (label heron.sources=local)
 #   HERON_REPO             repository the image clones Heron from
 #                                                   (default https://github.com/Lab-CORO/Heron.git)
 #   HERON_COMMIT           Heron commit to build   (default: HEAD of this checkout; it must be
@@ -27,11 +29,12 @@
 set -euo pipefail
 
 # ---- Pinned versions (each one checked when it was written here) -----------------
-# curobo_ros main of 2026-08-09 (06aef20) + fix/ik-batch-size (without it, ik_batch fails
-# for any batch of more than one pose). Its curobo_doosan submodule (m1013 config) is
-# pinned by it. The base image is built from the same commit.
-CUROBO_ROS_REPO=https://github.com/Lab-CORO/curobo_ros.git
-CUROBO_ROS_COMMIT=774acac604e25a00ff1157f9280857c5465e9151
+# curobo_ros main of 2026-08-09 (06aef20) + fix/ik-batch-size (ik_batch failed for any batch
+# of more than one pose) + feat/collision-cache-params (collision cache sized by ROS params).
+# Its curobo_doosan submodule (m1013 config) is pinned by it. The base image is built from
+# the same commit.
+CUROBO_ROS_REPO="${CUROBO_ROS_REPO:-https://github.com/Lab-CORO/curobo_ros.git}"
+CUROBO_ROS_COMMIT=927e410467936ac3481a88335c60ff2e3bb604cc
 CUROBO_MSGS_REPO=https://github.com/Lab-CORO/curobo_msgs.git
 CUROBO_MSGS_COMMIT=39ceb494666f023cc9ab11132cc537d85a428ad9
 CUROBO_REF=v0.8.0                     # NVlabs/curobo tag, commit 4ea77366
@@ -104,7 +107,7 @@ fi
 # The image clones this commit from HERON_REPO: fail now, not 30 minutes into the build.
 probe="$(mktemp -d)"
 if [ "$BASE_ONLY" = 0 ] && [ -z "$FROM_IMAGE" ] && ! { git -C "$probe" init -q && git -C "$probe" fetch -q --depth 1 "$HERON_REPO" "$HERON_COMMIT" 2>/dev/null; }; then
-  rm -rf "$probe"; die "commit $HERON_COMMIT is not on $HERON_REPO (push it first)"
+  rm -rf "$probe"; die "commit $HERON_COMMIT is not in $HERON_REPO (push it first, or set HERON_REPO to a local checkout)"
 fi
 rm -rf "$probe"
 
@@ -153,14 +156,30 @@ docker image inspect "$BASE_TAG" >/dev/null 2>&1 || die "base image $BASE_TAG mi
 [ "$BASE_ONLY" = 0 ] || { echo "== Base image $BASE_TAG ready (--base-only)"; exit 0; }
 
 # ---- 3. Heron layer -------------------------------------------------------------------
+# A local checkout cannot be reached from docker build: push the pinned commit into a bare
+# repository in the build context (sources/<name>.git), which the Dockerfile fetches from.
+CTX="$OUT_DIR/heron-context"; rm -rf "$CTX"; mkdir -p "$CTX/sources"
+SOURCES=github
+stage() {  # stage <name> <repo> <commit>: prints the repository the Dockerfile fetches from
+  if [ -d "$2" ]; then
+    git init -q --bare "$CTX/sources/$1.git"
+    git -C "$2" push -q "$CTX/sources/$1.git" "$3:refs/heads/pinned"
+    echo "/tmp/heron-sources/$1.git"
+  else
+    echo "$2"
+  fi
+}
+DOCKER_CUROBO_ROS_REPO="$(stage curobo_ros "$CUROBO_ROS_REPO" "$CUROBO_ROS_COMMIT")"
+DOCKER_HERON_REPO="$(stage Heron "$HERON_REPO" "$HERON_COMMIT")"
+[ -d "$CUROBO_ROS_REPO" ] || [ -d "$HERON_REPO" ] && SOURCES=local
 HIGHFIVE_TAG="$(sed -n 's/^ARG HIGHFIVE_TAG=//p' "$HERE/Dockerfile")"
 echo "== Building $IMAGE_TAG from Heron $HERON_COMMIT (log: $LOG_DIR/heron.log)"
 docker build --platform linux/amd64 --progress=plain \
   -f "$HERE/Dockerfile" -t "$IMAGE_TAG" \
   --build-arg BASE_IMAGE="$BASE_TAG" \
-  --build-arg HERON_REPO="$HERON_REPO" \
+  --build-arg HERON_REPO="$DOCKER_HERON_REPO" \
   --build-arg HERON_COMMIT="$HERON_COMMIT" \
-  --build-arg CUROBO_ROS_REPO="$CUROBO_ROS_REPO" \
+  --build-arg CUROBO_ROS_REPO="$DOCKER_CUROBO_ROS_REPO" \
   --build-arg CUROBO_ROS_COMMIT="$CUROBO_ROS_COMMIT" \
   --build-arg CUROBO_MSGS_REPO="$CUROBO_MSGS_REPO" \
   --build-arg CUROBO_MSGS_COMMIT="$CUROBO_MSGS_COMMIT" \
@@ -174,7 +193,8 @@ docker build --platform linux/amd64 --progress=plain \
   --label heron.cuda_arch="${TORCH_CUDA_ARCH_LIST// /;}" \
   --label heron.base="${NGC_IMAGE}@${NGC_DIGEST}" \
   --label heron.built="$BUILT" \
-  "$HERE" 2>&1 | tee "$LOG_DIR/heron.log"
+  --label heron.sources="$SOURCES" \
+  "$CTX" 2>&1 | tee "$LOG_DIR/heron.log"
 docker tag "$IMAGE_TAG" "${IMAGE_NAME}:latest"
 fi   # FROM_IMAGE
 
