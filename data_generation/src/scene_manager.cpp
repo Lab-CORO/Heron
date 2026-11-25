@@ -98,6 +98,15 @@ private:
     State state_ = State::WAITING_SERVICES;
     int current_iteration_ = 0;
     int real_dataset_size_ = 0;
+    // A failed Scene gets no Reachability map and is drawn again; this many failures in a
+    // row stop the run (exit code 1) instead of looping.
+    static constexpr int kMaxSceneFailures = 5;
+    int consecutive_scene_failures_ = 0;
+
+public:
+    bool failed_ = false;
+
+private:
     std::chrono::high_resolution_clock::time_point start_time_;
 
     // State machine timer
@@ -324,14 +333,29 @@ private:
             if (status == std::future_status::ready)
             {
                 auto response = scene_future_.get();
-                if (!response->success)
-                {
-                    RCLCPP_WARN(this->get_logger(),
-                        "Scene generation failed: %s", response->message.c_str());
-                }
 
                 // Reset flag for next use
                 scene_request_sent_ = false;
+
+                if (!response->success)
+                {
+                    ++consecutive_scene_failures_;
+                    if (consecutive_scene_failures_ >= kMaxSceneFailures)
+                    {
+                        RCLCPP_ERROR(this->get_logger(),
+                            "Scene generation failed %d times in a row, stopping: %s",
+                            consecutive_scene_failures_, response->message.c_str());
+                        failed_ = true;
+                        transition_to(State::FINISHED);
+                        return;
+                    }
+                    RCLCPP_WARN(this->get_logger(),
+                        "Scene generation failed (%d in a row), drawing a new Scene, no Reachability map: %s",
+                        consecutive_scene_failures_, response->message.c_str());
+                    transition_to(State::IDLE);
+                    return;
+                }
+                consecutive_scene_failures_ = 0;
 
                 // Transition to next state
                 transition_to(State::GENERATING_RM);
@@ -504,5 +528,5 @@ int main(int argc, char **argv)
 
     RCLCPP_INFO(node->get_logger(), "SceneManager shutting down.");
     rclcpp::shutdown();
-    return 0;
+    return node->failed_ ? 1 : 0;
 }

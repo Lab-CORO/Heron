@@ -99,6 +99,22 @@ The launch dir is mounted from this checkout, so the checkout and the image must
 an image built from this branch, launched from an older checkout, would start `curobo_ik`,
 which no longer exists.
 
+## Synthetic mode: the Station plus random cubes
+
+Each synthetic Scene is the Station's obstacles (its world file: for leeloo the floor, the
+ridgeback and the camera pole) plus 3 to `--obj-max` random cubes. `obstacle_adder` notes the
+Station's obstacles before the first Scene and checks, before every Scene, that only they
+remain: a Scene it cannot bring back to that state, or a cube curobo_ros refuses (full
+collision cache), fails, and gets no Reachability map; 5 failures in a row stop the task.
+
+A cube is drawn again when it comes within 5 cm of the robot's base (`collision_activation_distance`,
+judged against the base's cost with the Station alone); the log counts these draws per Scene.
+
+> Datasets generated before this (Humble image, and the first Jazzy runs) have **no Station
+> obstacles** in their synthetic Scenes: `remove_all_objects` removed them before the first
+> Scene. The Humble ones also have permuted orientations (curobo_ros v1 passed quaternions in
+> ROS order to cuRobo). Do not mix them with new synthetic Datasets in one Corpus.
+
 ## Real mode: camera calibration via TF
 
 The camera pose is resolved from the rosbag's **TF tree** (the camera moved between
