@@ -105,7 +105,10 @@ namespace cb_data_generator
 
         ~DataGenerator()
         {
-            this->data_file_->flush();
+            if (this->data_file_) // never opened when no Reachability map was asked for
+            {
+                this->data_file_->flush();
+            }
             RCLCPP_INFO(this->get_logger(), "DataGenerator is shutting down.");
         }
         

@@ -55,6 +55,11 @@ echo "   WORLD_FILE=${WORLD_FILE:-<default>}  OBJ_MAX=$OBJ_MAX"
 echo "   ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-n/a}"
 echo "================================================"
 
+# scene_manager leaves this file when it gives up (5 failed Scenes in a row); ros2 launch
+# itself exits 0 whatever its processes did.
+FAILED_MARK="$DATA_SHARE/generation_failed"
+rm -f "$FAILED_MARK"
+
 case "$MODE" in
   synthetic)
     ros2 launch data_generation generate_data.launch.py \
@@ -171,3 +176,8 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+if [ -f "$FAILED_MARK" ]; then
+  echo "ERROR: $(cat "$FAILED_MARK")" >&2
+  exit 1
+fi

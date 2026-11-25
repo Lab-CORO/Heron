@@ -9,6 +9,8 @@
 #include <functional>
 #include <future>
 #include <random>
+#include <fstream>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 using namespace std::chrono_literals;
 
@@ -346,6 +348,11 @@ private:
                             "Scene generation failed %d times in a row, stopping: %s",
                             consecutive_scene_failures_, response->message.c_str());
                         failed_ = true;
+                        // ros2 launch exits 0 whatever its processes did: tell run_generation.sh.
+                        std::ofstream(ament_index_cpp::get_package_share_directory("data_generation") +
+                                      "/data/generation_failed")
+                            << "Scene generation failed " << consecutive_scene_failures_
+                            << " times in a row: " << response->message << "\n";
                         transition_to(State::FINISHED);
                         return;
                     }

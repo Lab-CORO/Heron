@@ -109,7 +109,7 @@ add_executable(scene_manager
 )
 target_include_directories(scene_manager PUBLIC )
 target_link_libraries(scene_manager)
-ament_target_dependencies(scene_manager rclcpp std_srvs curobo_msgs rosbag2_interfaces)
+ament_target_dependencies(scene_manager rclcpp std_srvs curobo_msgs rosbag2_interfaces ament_index_cpp)
 
 
 
