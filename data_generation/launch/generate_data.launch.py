@@ -7,10 +7,15 @@ their `curobo_node` parameter.
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, Shutdown
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from collision_cache import cache_params  # noqa: E402  (next to this file)
 
 CUROBO_NODE = 'unified_planner'
 
@@ -18,6 +23,47 @@ CUROBO_NODE = 'unified_planner'
 def scene_half_extent():
     """Half side of the Scene cube (m): the Station's scene_half_extent, 1.52 by default."""
     return float(os.environ.get('HERON_SCENE_HALF_EXTENT') or 1.52)
+
+
+def curobo_node(context):
+    """The cuRobo node; its collision cache depends on world_file and obj_max."""
+    voxel_size = LaunchConfiguration('voxel_size')
+    world_file = LaunchConfiguration('world_file')
+    cameras_config_file = LaunchConfiguration('cameras_config_file')
+    robot_config_file = LaunchConfiguration('robot_config_file')
+    base_link = LaunchConfiguration('base_link')
+    half = scene_half_extent()
+    return [
+        Node(
+            package='curobo_ros',
+            executable='curobo_trajectory_planner',
+            name=CUROBO_NODE,
+            output='screen',
+            additional_env={'PYTHONFAULTHANDLER': '1'},
+            parameters=[{
+                'robot': 'doosan_m1013',
+                'robot_config_file': robot_config_file,
+                'base_link': base_link,
+                'world_file': world_file,
+                'cameras_config_file': cameras_config_file,
+                'voxel_size': ParameterValue(voxel_size, value_type=float),
+                # The voxel grid (get_voxel_grid) is this cube, centred on the base:
+                # ceil(2 * half / voxel_size) voxels per side, origin at -half.
+                'mapper_extent_xyz': [2.0 * half] * 3,
+                'mapper_grid_center': [0.0, 0.0, 0.0],
+                # obstacle_adder rejects a cube closer than this to the robot (5 cm, as
+                # under Humble): get_collision_distance is > 0 within this distance.
+                'collision_activation_distance': 0.05,
+                # Nobody reads the sparse voxel topic here; it would rebuild the full grid
+                # several times a second.
+                'sparse_voxel_publish_rate': 0.0,
+                # Sized to the world file plus the cubes obstacle_adder adds (collision_cache.py).
+                **cache_params(world_file.perform(context),
+                               int(LaunchConfiguration('obj_max').perform(context)),
+                               voxel_layers=1),
+            }],
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -56,31 +102,7 @@ def generate_launch_description():
         DeclareLaunchArgument('base_link', default_value="base_0"),
     ]
     return LaunchDescription(args + [
-        Node(
-            package='curobo_ros',
-            executable='curobo_trajectory_planner',
-            name=CUROBO_NODE,
-            output='screen',
-            additional_env={'PYTHONFAULTHANDLER': '1'},
-            parameters=[{
-                'robot': 'doosan_m1013',
-                'robot_config_file': robot_config_file,
-                'base_link': base_link,
-                'world_file': world_file,
-                'cameras_config_file': cameras_config_file,
-                'voxel_size': ParameterValue(voxel_size, value_type=float),
-                # The voxel grid (get_voxel_grid) is this cube, centred on the base:
-                # ceil(2 * half / voxel_size) voxels per side, origin at -half.
-                'mapper_extent_xyz': [2.0 * half] * 3,
-                'mapper_grid_center': [0.0, 0.0, 0.0],
-                # obstacle_adder rejects a cube closer than this to the robot (5 cm, as
-                # under Humble): get_collision_distance is > 0 within this distance.
-                'collision_activation_distance': 0.05,
-                # Nobody reads the sparse voxel topic here; it would rebuild the full grid
-                # several times a second.
-                'sparse_voxel_publish_rate': 0.0,
-            }],
-        ),
+        OpaqueFunction(function=curobo_node),
         Node(
             package='data_generation',
             executable='obstacle_adder',

@@ -8,10 +8,15 @@ bag's /tf (base_link parameter -> the camera frame) when the config has `extrins
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, ExecuteProcess, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from collision_cache import cache_params  # noqa: E402  (next to this file)
 
 CUROBO_NODE = 'unified_planner'
 
@@ -19,6 +24,43 @@ CUROBO_NODE = 'unified_planner'
 def scene_half_extent():
     """Half side of the Scene cube (m): the Station's scene_half_extent, 1.52 by default."""
     return float(os.environ.get('HERON_SCENE_HALF_EXTENT') or 1.52)
+
+
+def curobo_node(context):
+    """The cuRobo node; its collision cache depends on world_file and obj_max."""
+    voxel_size = LaunchConfiguration('voxel_size')
+    world_file = LaunchConfiguration('world_file')
+    cameras_config_file = LaunchConfiguration('cameras_config_file')
+    robot_config_file = LaunchConfiguration('robot_config_file')
+    base_link = LaunchConfiguration('base_link')
+    half = scene_half_extent()
+    return [
+        Node(
+            package='curobo_ros',
+            executable='curobo_trajectory_planner',
+            name=CUROBO_NODE,
+            output='screen',
+            additional_env={'PYTHONFAULTHANDLER': '1'},
+            parameters=[{
+                'robot': 'doosan_m1013',
+                'robot_config_file': robot_config_file,
+                'base_link': base_link,
+                'world_file': world_file,
+                'cameras_config_file': cameras_config_file,
+                'voxel_size': ParameterValue(voxel_size, value_type=float),
+                # Scene cube centred on the base: ceil(2 * half / voxel_size) voxels per side.
+                'mapper_extent_xyz': [2.0 * half] * 3,
+                'mapper_grid_center': [0.0, 0.0, 0.0],
+                'mapper_voxel_size': ParameterValue(voxel_size, value_type=float),
+                'collision_activation_distance': 0.05,
+                'sparse_voxel_publish_rate': 0.0,
+                # Sized to the world file plus the cubes obstacle_adder adds (collision_cache.py).
+                **cache_params(world_file.perform(context),
+                               int(LaunchConfiguration('obj_max').perform(context)),
+                               voxel_layers=1),
+            }],
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -65,27 +107,7 @@ def generate_launch_description():
                  '/tf', '/tf_static'],
             output='screen',
         ),
-        Node(
-            package='curobo_ros',
-            executable='curobo_trajectory_planner',
-            name=CUROBO_NODE,
-            output='screen',
-            additional_env={'PYTHONFAULTHANDLER': '1'},
-            parameters=[{
-                'robot': 'doosan_m1013',
-                'robot_config_file': robot_config_file,
-                'base_link': base_link,
-                'world_file': world_file,
-                'cameras_config_file': cameras_config_file,
-                'voxel_size': ParameterValue(voxel_size, value_type=float),
-                # Scene cube centred on the base: ceil(2 * half / voxel_size) voxels per side.
-                'mapper_extent_xyz': [2.0 * half] * 3,
-                'mapper_grid_center': [0.0, 0.0, 0.0],
-                'mapper_voxel_size': ParameterValue(voxel_size, value_type=float),
-                'collision_activation_distance': 0.05,
-                'sparse_voxel_publish_rate': 0.0,
-            }],
-        ),
+        OpaqueFunction(function=curobo_node),
         Node(
             package='data_generation',
             executable='obstacle_adder',

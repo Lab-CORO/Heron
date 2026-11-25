@@ -42,6 +42,10 @@ def generate_launch_description():
                 'cameras_config_file': '',
                 'voxel_size': ParameterValue(voxel_size, value_type=float),
                 'sparse_voxel_publish_rate': 0.0,
+                # No obstacle at all: no collision cache (cuRobo checks every slot, even empty).
+                'collision_cache_cuboid': 0,
+                'collision_cache_mesh': 0,
+                'collision_cache_voxel': 0,
             }],
         ),
         Node(
