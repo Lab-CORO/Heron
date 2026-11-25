@@ -146,6 +146,9 @@ stop_container() {
 }
 trap stop_container USR1
 
+# create_rm writes its master map only at the very end; anything older is a previous run's.
+START_MARK="$(mktemp "${SLURM_TMPDIR:-/tmp}/heron_start.XXXXXX")"
+
 echo "Launching apptainer (MODE=${MODE}, task=${SLURM_ARRAY_TASK_ID:-n/a})..."
 setsid -w apptainer exec -C --net --network=none --nv \
   "${BINDS[@]}" \
@@ -187,6 +190,18 @@ if [ -n "${TASK_DIR:-}" ]; then
   rm -rf "${TASK_DIR}"                      # hardlinks only; originals in DATA_DIR untouched
   rmdir "${DATA_DIR}/.tasks" 2>/dev/null || true
 fi
+
+# ros2 launch exits 0 when a required node dies (it just shuts the rest down): a
+# create_rm killed for lack of memory used to report status=0. Require the master map.
+if [ "${MODE}" = "create_rm" ] && [ "${STATUS}" -eq 0 ]; then
+  for ext in npz h5; do
+    if [ -z "$(find "${DATA_DIR}" -maxdepth 1 -name "master_ik_data*.${ext}" -newer "${START_MARK}" -print -quit)" ]; then
+      echo "ERROR: create_rm wrote no master_ik_data*.${ext} in ${DATA_DIR} (crashed? out of memory? see the log above)" >&2
+      STATUS=1
+    fi
+  done
+fi
+rm -f "${START_MARK}"
 
 echo "Job task ${SLURM_ARRAY_TASK_ID:-n/a} completed (MODE=${MODE}, status=${STATUS})."
 exit "${STATUS}"
