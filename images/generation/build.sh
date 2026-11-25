@@ -30,11 +30,12 @@ set -euo pipefail
 
 # ---- Pinned versions (each one checked when it was written here) -----------------
 # curobo_ros main of 2026-08-09 (06aef20) + fix/ik-batch-size (ik_batch failed for any batch
-# of more than one pose) + feat/collision-cache-params (collision cache sized by ROS params).
+# of more than one pose) + feat/collision-cache-params (collision cache sized by ROS params,
+# one GPU->CPU copy per IK batch, world obstacles registered by name).
 # Its curobo_doosan submodule (m1013 config) is pinned by it. The base image is built from
 # the same commit.
 CUROBO_ROS_REPO="${CUROBO_ROS_REPO:-https://github.com/Lab-CORO/curobo_ros.git}"
-CUROBO_ROS_COMMIT=927e410467936ac3481a88335c60ff2e3bb604cc
+CUROBO_ROS_COMMIT=f2ede467039c66894a9337957ba01f818853eed9
 CUROBO_MSGS_REPO=https://github.com/Lab-CORO/curobo_msgs.git
 CUROBO_MSGS_COMMIT=39ceb494666f023cc9ab11132cc537d85a428ad9
 CUROBO_REF=v0.8.0                     # NVlabs/curobo tag, commit 4ea77366
