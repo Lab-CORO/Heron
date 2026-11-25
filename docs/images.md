@@ -103,7 +103,9 @@ What a generation job may rely on (`data_generation/pipeline/job.sbatch`):
 
 curobo_ros runs as one node, `curobo_trajectory_planner`, named `unified_planner`; heron's nodes
 reach its services (`/unified_planner/ik_batch`, `…/get_voxel_grid`, …) through their
-`curobo_node` parameter. The Scene cube comes from the Station (`HERON_SCENE_HALF_EXTENT`): the
+`curobo_node` parameter. Its collision cache is sized per run from the world file and
+`obj_max` (`data_generation/launch/collision_cache.py`): an oversized cache slows IK down about
+4x. The Scene cube comes from the Station (`HERON_SCENE_HALF_EXTENT`): the
 launch files set curobo_ros's `mapper_extent_xyz` to `2 × scene_half_extent`, and `generate_data`
 refuses a grid that is not `ceil(2 × scene_half_extent / voxel)` voxels per side (152 for
 leeloo at 0.02).
