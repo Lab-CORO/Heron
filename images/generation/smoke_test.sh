@@ -12,6 +12,8 @@
 #   --half-extent H        Station scene_half_extent (default 1.52, leeloo)
 #   --batch-size N         IK poses per batch (default 10000; lower it on a small GPU)
 #   --obj-max N            max random cubes per Scene (default 20)
+#   --world FILE           the Station's world file (e.g. data_generation/config/leeloo_world.yaml);
+#                          default none, as for the bare Station
 #   --work DIR             work directory (default: a new one under /var/tmp)
 #
 # synthetic: generates one Scene (DATASET_SIZE=1) and checks the .h5: group/0/voxel_grid and
@@ -22,7 +24,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
-SIF=""; MM_DIR=""; MODE=synthetic; VOXEL=0.02; HALF=1.52; BATCH=10000; OBJ_MAX=20; WORK=""
+SIF=""; MM_DIR=""; MODE=synthetic; VOXEL=0.02; HALF=1.52; BATCH=10000; OBJ_MAX=20; WORK=""; WORLD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --sif) SIF="$2"; shift 2;;
@@ -33,7 +35,8 @@ while [ $# -gt 0 ]; do
     --batch-size) BATCH="$2"; shift 2;;
     --obj-max) OBJ_MAX="$2"; shift 2;;
     --work) WORK="$2"; shift 2;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0;;
+    --world) WORLD="$2"; shift 2;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -52,6 +55,11 @@ apptainer exec -C --nv "$SIF" python3 -c \
 
 echo "== 2. generation ($MODE, voxel $VOXEL, half extent $HALF) in $WORK"
 cp "$REPO_ROOT/data_generation/pipeline/run_generation.sh" "$DATA/"
+WORLD_FILE=""
+if [ -n "$WORLD" ]; then
+  [ -f "$WORLD" ] || die "--world: no such file '$WORLD'"
+  cp "$WORLD" "$DATA/"; WORLD_FILE="$(basename "$WORLD")"
+fi
 BINDS=(
   --bind "$DATA":"$CONTAINER_SHARE/data"
   --bind "$REPO_ROOT/data_generation/launch":"$CONTAINER_SHARE/launch"
@@ -69,7 +77,7 @@ fi
 export APPTAINERENV_MODE="$MODE" APPTAINERENV_VOXEL="$VOXEL" APPTAINERENV_DATASET_SIZE=1 \
        APPTAINERENV_BATCH_SIZE="$BATCH" APPTAINERENV_INIT_BATCH_SIZE="$BATCH" \
        APPTAINERENV_OBJ_MAX="$OBJ_MAX" APPTAINERENV_REACH_MAX=1.3 APPTAINERENV_ROBOT_CONFIG_FILE= \
-       APPTAINERENV_BASE_LINK=base_0 APPTAINERENV_WORLD_FILE= APPTAINERENV_CAMERA_FRAME= \
+       APPTAINERENV_BASE_LINK=base_0 APPTAINERENV_WORLD_FILE="$WORLD_FILE" APPTAINERENV_CAMERA_FRAME= \
        APPTAINERENV_SLURM_ARRAY_TASK_ID=1 APPTAINERENV_HERON_SCENE_HALF_EXTENT="$HALF"
 start=$(date +%s)
 set +e
@@ -102,7 +110,10 @@ print("  reachability_map", rm.shape, "min", rm.min(), "max", rm.max(), "non-zer
 ok = vg.shape == (n, n, n) and rm.shape == (n, n, n)
 eps = 1e-9   # a voxel reachable in all 50 orientations sums 50 x 1/50 = 1.0000000000000004
 ok &= -eps <= rm.min() and rm.max() <= 1 + eps and 0.0 <= vg.min() and vg.max() <= 1.0 and (rm > 0).any()
-print("OK" if ok else f"FAILED (expected {n}^3, values in [0, 1], a non-empty map)")
+both = int(((vg > 0) & (rm > 0)).sum())
+print("  occupied and reachable:", both)
+ok &= both == 0
+print("OK" if ok else f"FAILED (expected {n}^3, values in [0, 1], a non-empty map, nothing both occupied and reachable)")
 sys.exit(0 if ok else 1)
 '
 for out in "${outs[@]}"; do
