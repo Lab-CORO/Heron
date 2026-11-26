@@ -68,7 +68,7 @@ site.env
 
 # Master IK map installed by CMakeLists.txt (~2.2 GB)
 data_generation/data/*
-!data_generation/data/bidon.txt
+!data_generation/data/.gitkeep
 
 # Python tooling
 .pytest_cache/
