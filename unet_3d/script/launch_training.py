@@ -64,8 +64,8 @@ BIND_MOUNT           = "./CapaciNet/:/workspace/"
 PYTORCH3DUNET_LOSSES = "/opt/conda/lib/python3.10/site-packages/pytorch3dunet/unet3d/losses.py"
 CUSTOM_LOSSES_HOST   = os.path.join(CAPACINET_DIR, "unet_3d", "custom", "losses.py")
 
-# Slurm defaults
-DEFAULT_ACCOUNT   = "def-jerobg"
+# Slurm defaults. No account here: sbatch takes it from $SBATCH_ACCOUNT
+# (or the cluster's default), so it stays out of the repository.
 DEFAULT_TIME      = "30:00:00"
 DEFAULT_MEM_CPU   = "30G"
 DEFAULT_GPUS      = 1
@@ -473,7 +473,6 @@ def ask_slurm_params():
     """Collect Slurm resource parameters."""
     print("\n-- Slurm resources --")
     return {
-        "account":    DEFAULT_ACCOUNT,
         "time":       prompt("Time limit (HH:MM:SS)", default=DEFAULT_TIME),
         "mem_per_cpu": prompt("Memory per CPU",       default=DEFAULT_MEM_CPU),
         "gpus":       prompt("GPUs per node",         default=DEFAULT_GPUS,  cast=int),
@@ -657,7 +656,6 @@ echo ""
 
     return f"""\
 #!/bin/bash
-#SBATCH --account={sp['account']}
 #SBATCH --job-name={exp_name}
 #SBATCH --output={logs_dir}/slurm_%j.out
 #SBATCH --error={logs_dir}/slurm_%j.err
@@ -1052,7 +1050,6 @@ def generate_evaluation_report(exp):
     exp_name = exp["name"]
     job_content = f"""\
 #!/bin/bash
-#SBATCH --account={DEFAULT_ACCOUNT}
 #SBATCH --job-name=eval_{exp_name}
 #SBATCH --output={logs_dir}/slurm_eval_%j.out
 #SBATCH --error={logs_dir}/slurm_eval_%j.err

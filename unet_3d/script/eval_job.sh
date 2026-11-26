@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=def-jerobg
 #SBATCH --job-name=capa_eval
 #SBATCH --output=/lustre06/project/6089348/willore/CapaciNet/unet_3d/script/eval_logs/slurm_%j.out
 #SBATCH --error=/lustre06/project/6089348/willore/CapaciNet/unet_3d/script/eval_logs/slurm_%j.err

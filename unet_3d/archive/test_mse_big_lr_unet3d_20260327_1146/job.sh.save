@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=def-jerobg
 #SBATCH --job-name=test_mse_residual_unet3d_20260325_1126
 #SBATCH --output=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/test_mse_residual_unet3d_20260325_1126/logs/slurm_%j.out
 #SBATCH --error=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/test_mse_residual_unet3d_20260325_1126/logs/slurm_%j.err

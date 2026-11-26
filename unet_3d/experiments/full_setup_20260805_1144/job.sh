@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=def-jerobg
 #SBATCH --job-name=full_setup_20260805_1144
 #SBATCH --output=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/full_setup_20260805_1144/logs/slurm_%j.out
 #SBATCH --error=/lustre06/project/6089348/willore/CapaciNet/unet_3d/experiments/full_setup_20260805_1144/logs/slurm_%j.err
