@@ -104,6 +104,11 @@ private:
     // row stop the run (exit code 1) instead of looping.
     static constexpr int kMaxSceneFailures = 5;
     int consecutive_scene_failures_ = 0;
+    // A failed Reachability map loses its Scene (the run goes on with the next one); this
+    // many in a row stop the run: the cause is the setup (IK warmup refused, a world that
+    // collides with the robot everywhere...), and the next maps would fail the same way.
+    static constexpr int kMaxRmFailures = 5;
+    int consecutive_rm_failures_ = 0;
 
 public:
     bool failed_ = false;
@@ -174,6 +179,18 @@ private:
             state_to_string(new_state).c_str());
 
         state_ = new_state;
+    }
+
+    // Stop the run as failed. ros2 launch exits 0 whatever its processes did, so the reason
+    // also goes to a file run_generation.sh checks (it then exits 1).
+    void give_up(const std::string &why)
+    {
+        RCLCPP_ERROR(this->get_logger(), "%s, stopping", why.c_str());
+        failed_ = true;
+        std::ofstream(ament_index_cpp::get_package_share_directory("data_generation") +
+                      "/data/generation_failed")
+            << why << "\n";
+        transition_to(State::FINISHED);
     }
 
     // Main state machine callback (called at 10Hz)
@@ -262,6 +279,13 @@ private:
         // Check if we've completed all iterations
         if (current_iteration_ >= dataset_size_)
         {
+            // Fewer than kMaxRmFailures Scenes, all failed: still a run with nothing in it.
+            if (dataset_size_ > 0 && real_dataset_size_ == 0)
+            {
+                give_up("No Reachability map in " + std::to_string(dataset_size_) +
+                        " Scene(s): every map failed (see generate_data log)");
+                return;
+            }
             transition_to(State::FINISHED);
             return;
         }
@@ -344,16 +368,8 @@ private:
                     ++consecutive_scene_failures_;
                     if (consecutive_scene_failures_ >= kMaxSceneFailures)
                     {
-                        RCLCPP_ERROR(this->get_logger(),
-                            "Scene generation failed %d times in a row, stopping: %s",
-                            consecutive_scene_failures_, response->message.c_str());
-                        failed_ = true;
-                        // ros2 launch exits 0 whatever its processes did: tell run_generation.sh.
-                        std::ofstream(ament_index_cpp::get_package_share_directory("data_generation") +
-                                      "/data/generation_failed")
-                            << "Scene generation failed " << consecutive_scene_failures_
-                            << " times in a row: " << response->message << "\n";
-                        transition_to(State::FINISHED);
+                        give_up("Scene generation failed " + std::to_string(consecutive_scene_failures_) +
+                                " times in a row: " + response->message);
                         return;
                     }
                     RCLCPP_WARN(this->get_logger(),
@@ -393,22 +409,31 @@ private:
             if (status == std::future_status::ready)
             {
                 auto response = rm_future_.get();
+
+                // Reset flag for next use
+                rm_request_sent_ = false;
+
                 if (response->success)
                 {
                     real_dataset_size_++;
+                    consecutive_rm_failures_ = 0;
                     RCLCPP_DEBUG(this->get_logger(), "RM generation successful");
                 }
                 else
                 {
+                    ++consecutive_rm_failures_;
+                    if (consecutive_rm_failures_ >= kMaxRmFailures)
+                    {
+                        give_up("Reachability map generation failed " + std::to_string(consecutive_rm_failures_) +
+                                " times in a row: " + response->message);
+                        return;
+                    }
                     RCLCPP_WARN(this->get_logger(),
-                        "RM generation failed: %s", response->message.c_str());
+                        "RM generation failed (%d in a row): %s", consecutive_rm_failures_, response->message.c_str());
                 }
 
                 // Increment iteration counter
                 current_iteration_++;
-
-                // Reset flag for next use
-                rm_request_sent_ = false;
 
                 // Transition based on mode
                 if (use_rosbag_mode_)
