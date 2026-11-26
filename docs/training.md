@@ -57,8 +57,8 @@ every part's metrics. Commit that file to keep the results. `--figures` draws, o
 (matplotlib), `confusion_matrix.png`, `error_histogram.png`, `tolerance_curve.png` and
 `regions_<n>.png` from `eval_data.h5`.
 
-The metrics are those of the former `script/evaluate.py`, unchanged: on the same checkpoint
-and volumes both give identical reports.
+The metrics are those of the former `unet_3d/script/evaluate.py` (removed, see the git history),
+unchanged: on the same checkpoint and volumes both gave identical reports.
 
 ## TensorRT: inference time per precision
 
@@ -115,11 +115,3 @@ tensorboard --logdir <data root>/experiments/my_run_20261023_1430/checkpoint
 ```
 
 The best score is read from the SLURM logs (`Evaluation score:` lines).
-
-## Older tools
-
-`script/launch_training.py` (interactive launcher), `run_training.sh`,
-`script/format_data.py`, `script/evaluate.py`, `script/eval_job.sh` and `custom/losses.py`
-are superseded by `heron prepare` /
-`heron train` and will be removed. The experiments under `experiments/` and `archive/`
-were made with them; their `config.yaml` use `/workspace/...` container paths.

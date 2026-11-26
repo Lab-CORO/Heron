@@ -1,6 +1,6 @@
 """Metrics of a predicted Reachability map against the generated one.
 
-Ported unchanged from unet_3d/script/evaluate.py so reports stay comparable.
+Ported unchanged from the former unet_3d/script/evaluate.py so reports stay comparable.
 The reachability index is a fraction of 50 (n reachable orientations -> n/50), so
 classification treats each voxel as one of 51 ordinal classes via
 class = round(value * 50), applied to BOTH prediction and ground truth.

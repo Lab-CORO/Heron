@@ -557,8 +557,8 @@ class ObstacleManager:
             feature    : float32 array, shape (Nx, Ny, Nz) -- signed distance in meters,
                          POSITIVE inside obstacles, NEGATIVE in free space (curobo's
                          WorldVoxelCollision convention, confirmed empirically in
-                         pipeline/verify_voxel_esdf.py -- do not flip this sign without
-                         re-running that check).
+                         verify_voxel_esdf.py, in the git history -- do not flip this
+                         sign without re-running that check).
             dims       : float64 array, shape (3,) -- grid extents in meters [x, y, z]
             voxel_size : float64 scalar -- meters per voxel (uniform, cubic voxels)
             pose       : float64 array, shape (7,) -- [x, y, z, qw, qx, qy, qz] of the

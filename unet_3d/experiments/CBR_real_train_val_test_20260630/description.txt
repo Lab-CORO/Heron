@@ -1,2 +1,0 @@
-train avec les vrai dataset reel.Mais avec des data qui n'ont jamais ete vu pour le test:
-80-10-10.

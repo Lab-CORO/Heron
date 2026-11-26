@@ -5,7 +5,7 @@ load_scene.py -- CapaciNet 'scene' pipeline mode.
 Reads one scene (a dense occupancy voxel grid) out of a shared HDF5 file, injects
 it into the running curobo_ik node's collision world, and triggers RM generation
 via the existing `generate_data` node -- so the rest of the pipeline (HDF5 output
-with voxel_grid + reachability_map, format_data.py, etc.) is unchanged.
+with voxel_grid + reachability_map, heron prepare, etc.) is unchanged.
 
 Two ways to inject the scene, tried in order:
 
@@ -13,7 +13,7 @@ Two ways to inject the scene, tried in order:
      `/curobo_ik/load_voxel_scene` service (see pipeline/curobo_patch/), which only
      exists if that patch is bind-mounted over curobo_ros's installed files. This
      avoids decomposing the scene into obstacles entirely. Confirmed viable on GPU
-     by pipeline/verify_voxel_esdf.py (WorldConfig.voxel + CollisionCheckerType.VOXEL
+     by verify_voxel_esdf.py, since removed: see the git history (WorldConfig.voxel + CollisionCheckerType.VOXEL
      IS enforced by WorldVoxelCollision once fed via update_voxel_data()).
 
   2. Cuboid fallback: if the service above is unavailable or fails (patch not
@@ -82,7 +82,7 @@ def read_scene(scene_npz_path: str):
 
 def occupancy_to_esdf(occ: np.ndarray, voxel_size: float) -> np.ndarray:
     """Signed distance in meters, + inside obstacles, - in free space (curobo convention,
-    confirmed in verify_voxel_esdf.py)."""
+    confirmed by verify_voxel_esdf.py, in the git history)."""
     inside = distance_transform_edt(occ)
     outside = distance_transform_edt(~occ)
     return ((inside - outside) * voxel_size).astype(np.float32)

@@ -1,6 +1,6 @@
 """Figures of an evaluation, drawn on the host from eval_data.h5 (needs matplotlib).
 
-Ported unchanged from unet_3d/script/evaluate.py.
+Ported unchanged from the former unet_3d/script/evaluate.py.
 """
 import os
 
