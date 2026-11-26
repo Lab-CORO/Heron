@@ -13,7 +13,6 @@ data_generation/pipeline/
   split_scenes.py     # (scene mode) host-side: scenes.h5 -> one .npz per scene
   load_scene.py       # (scene mode) in-container: inject scene into curobo, trigger RM
   curobo_patch/       # curobo_ros files bind-mounted over the .sif's copies (see its README)
-  verify_voxel_esdf.py / .sbatch   # one-off GPU check of the native ESDF path
 ```
 
 Robots and stations are described once, at the repository root, in
@@ -163,8 +162,8 @@ parallel and total wall time is set by the queue, not by the scene count.
 1. **Native ESDF (default).** The grid becomes a `curobo.geom.types.VoxelGrid`
    (`WorldConfig.voxel` + `CollisionCheckerType.VOXEL`) — cuRobo's own ESDF
    obstacle type — via a new `/curobo_ik/load_voxel_scene` service. **No cuboid
-   decomposition at all**, so scene complexity costs nothing extra. Verified on GPU
-   by `verify_voxel_esdf.py` (submit `verify_voxel_esdf.sbatch`): an externally
+   decomposition at all**, so scene complexity costs nothing extra. Verified once on GPU
+   (`verify_voxel_esdf.py`, since removed: see the git history): an externally
    supplied ESDF array *is* enforced by `WorldVoxelCollision` (+0.15 inside a solid
    blob, −1.0 in free space).
 2. **Cuboid fallback.** If that service is missing or fails, the grid is merged into
@@ -210,7 +209,7 @@ heron prepare corpus/my_corpus.yaml --submit   # as a SLURM CPU job (--account, 
 
 It writes `<data root>/corpora/<name>/{train,val,test/<name>}/` in the pytorch-3dunet
 format (`raw` / `label`) plus `corpus.yaml` (recipe, crop, counts and sources per part).
-Compared with the scripts below:
+Compared with the former `unet_3d/script/` tools:
 
 - the validation part is drawn **by source** (a rosbag, a generated file, a scene), so
   near-duplicate scenes never end up on both sides;
@@ -225,54 +224,3 @@ Datasets generated before manifests existed need one first:
 ```bash
 heron dataset describe datasets/real_long_test --robot m1013 --station leeloo --mode real --voxel 0.02
 ```
-
-The scripts below are superseded by `heron prepare` and will be removed once training
-reads Corpora directly.
-
-### Crop + format to unet3d (`crop_format.py`)
-
-Standalone script: crops each volume (152³ → 128³) and writes unet3d `raw`/`label`
-files (updating the `origine_*` / `voxel_grid_size_*` attributes, dropping all-zero
-reachability maps, robust to Lustre file locks).
-
-Cropping is by **explicit indices** `--crop x0 x1 y0 y1 z0 z1` (default
-`12 140 12 140 20 148`, same as `launch_training.py` — a 128³ window shifted in z to
-drop the floor), or by a **centered** cube via `--size N` (overrides `--crop`).
-
-```bash
-python CapaciNet/data_generation/pipeline/crop_format.py \
-    --input_dir datasets/real_long \
-    --output_dir CapaciNet/unet_3d/data/real_long_128 \
-    [--crop 12 140 12 140 20 148] [--size 128] [--split --val_ratio 0.1] [--keep-empty]
-```
-
-For upsampling / Z-rotation augmentation, use `unet_3d/script/format_data.py` instead.
-
-### Two-bucket split (validation réelle + entraînement augmenté)
-
-```bash
-# 1) drop empty / failed reachability maps
-python CapaciNet/unet_3d/script/clean_dataset.py ...   # -> rejected/
-
-# 2a) hold out a fraction as a pure REAL validation set (no augmentation)
-python CapaciNet/unet_3d/script/format_data.py --input_dir <subset> --output_dir <val_real>
-
-# 2b) augment the rest for training (Z-rotations, no split)
-python CapaciNet/unet_3d/script/format_data.py --input_dir <rest> --output_dir <train_aug> --n_copies K
-```
-
-Then point `unet_3d/config/train_reach.yaml` (`train`/`val` dirs) at those folders.
-
-> **Array filename note:** `data_generator.cpp` names output by timestamp (second
-> resolution). With large arrays two tasks can collide (cf. the old `data_corrompu/`).
-> The random start delay in `run_generation.sh` diversifies the captured scene (its
-> real purpose), it is **not** collision avoidance — rely on `clean_dataset.py` and an
-> HDF5 integrity check to drop any corrupt file.
-
-## Migration
-
-This pipeline supersedes the per-robot scripts at the project root:
-`gpu_job*.sh`, `data_*/gpu_job_*.sh`, `create_rm_ur5e.sh`,
-`real_data_generation_job.sh`, `data/main.bash`, `data/run_real_data_generation.sh`,
-and the `create_reachability_map_<robot>.launch.py` variants. Remove them once the new
-pipeline is validated.
