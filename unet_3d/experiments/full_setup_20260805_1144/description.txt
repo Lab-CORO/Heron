@@ -1,1 +1,0 @@
-Trainning with the full setup in reel. Dataset with a real half life of 2s for voxel

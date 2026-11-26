@@ -1,1 +1,0 @@
-This test is to avoid over trainning and see if we can reduce the number of epoch
