@@ -32,8 +32,7 @@ data_generation/         ROS 2 C++ package (IK over a voxel grid -> HDF5) and it
 images/                  container build files (docs/images.md: what each environment must provide)
 results/                 evaluation and benchmark summaries, committed
 tests/                   pytest, no GPU or cluster needed
-unet_3d/                 training docs, past experiments and the scripts heron replaces
-docs/                    environments, ADRs, prompts for building the images
+docs/                    training guide, environments, ADRs, prompts for building the images
 site.example.yaml        copy to site.yaml: accounts, modules, images, data root (not versioned)
 ```
 
@@ -84,7 +83,7 @@ heron benchmark my_run_<date> --precision fp32 fp16 int8
 ```
 
 Details: [data_generation/pipeline/README.md](data_generation/pipeline/README.md) (generation
-modes and options), [unet_3d/README.md](unet_3d/README.md) (training, evaluation, TensorRT),
+modes and options), [docs/training.md](docs/training.md) (training, evaluation, TensorRT),
 [results/README.md](results/README.md) (what the result files hold).
 
 ## Status
@@ -96,10 +95,6 @@ modes and options), [unet_3d/README.md](unet_3d/README.md) (training, evaluation
 | Generation | runs in the ROS 2 Humble + cuRobo v1 image; moving to ROS 2 Jazzy + cuRobo v2 ([docs/prompts/generation-image.md](docs/prompts/generation-image.md)) |
 | Generation, `scene` mode | old image only: not yet ported to the Jazzy image |
 | Training image (`images/training/Dockerfile`) | never built; clusters use the venv |
-
-`unet_3d/script/` (`launch_training.py`, `format_data.py`, `evaluate.py`…) and
-`unet_3d/run_training.sh` are superseded by `heron prepare`, `heron train` and
-`heron evaluate`, and will be removed.
 
 ## Contributing
 
