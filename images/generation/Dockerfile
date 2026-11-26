@@ -59,7 +59,6 @@ RUN fetch() { mkdir -p "$3" && git -C "$3" init -q && git -C "$3" fetch -q --dep
     && git -C curobo_ros submodule update --init --recursive --depth 1 \
     && fetch "${CUROBO_MSGS_REPO}" "${CUROBO_MSGS_COMMIT}" curobo_msgs \
     && fetch "${HERON_REPO}" "${HERON_COMMIT}" Heron \
-    && touch Heron/unet_3d/COLCON_IGNORE \
     && rm -rf /tmp/heron-sources
 
 # ---- Build: curobo_msgs, curobo_ros, data_generation ----------------------------------
