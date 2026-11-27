@@ -1,0 +1,4 @@
+name: heron_smoke
+corpus: heron_smoke
+resources: {time: "1:00:00"}
+pytorch3dunet: {trainer: {max_num_iterations: 200}}

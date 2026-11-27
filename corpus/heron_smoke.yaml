@@ -1,0 +1,7 @@
+name: heron_smoke
+datasets:
+  - path: datasets/heron_smoke
+crop: {size: 128}
+val_ratio: 0.5
+augment: {copies: 1, angle: 180}
+seed: 42
