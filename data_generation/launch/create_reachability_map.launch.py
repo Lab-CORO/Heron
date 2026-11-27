@@ -9,6 +9,12 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stop_on_death import stop_on_death  # noqa: E402  (next to this file)
+
 CUROBO_NODE = 'unified_planner'
 
 
@@ -33,6 +39,7 @@ def generate_launch_description():
             executable='curobo_trajectory_planner',
             name=CUROBO_NODE,
             output='screen',
+            on_exit=stop_on_death('curobo_trajectory_planner'),
             additional_env={'PYTHONFAULTHANDLER': '1'},
             parameters=[{
                 'robot': 'doosan_m1013',

@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from collision_cache import cache_params  # noqa: E402  (next to this file)
+from stop_on_death import stop_on_death  # noqa: E402
 
 CUROBO_NODE = 'unified_planner'
 
@@ -39,6 +40,7 @@ def curobo_node(context):
             executable='curobo_trajectory_planner',
             name=CUROBO_NODE,
             output='screen',
+            on_exit=stop_on_death('curobo_trajectory_planner'),
             additional_env={'PYTHONFAULTHANDLER': '1'},
             parameters=[{
                 'robot': 'doosan_m1013',
@@ -108,6 +110,7 @@ def generate_launch_description():
             executable='obstacle_adder',
             name='obstacle_adder',
             output='screen',
+            on_exit=stop_on_death('obstacle_adder'),
             parameters=[{'curobo_node': CUROBO_NODE}],
         ),
         Node(
@@ -115,6 +118,7 @@ def generate_launch_description():
             executable='generate_data',
             name='generate_data',
             output='screen',
+            on_exit=stop_on_death('generate_data'),
             parameters=[{
                 'curobo_node': CUROBO_NODE,
                 'voxel_size': ParameterValue(voxel_size, value_type=float),
