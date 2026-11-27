@@ -242,10 +242,19 @@ case "$MODE" in
         sed "s|__CAMERA_FRAME__|${CAMERA_FRAME}|g" "${CAMERAS_TEMPLATE}" > "${DATA_DIR}/cameras.yaml"
       fi
       # Stage rosbag to scratch (fast) once; array tasks copy from there to local SSD.
-      if [ "$bag_src" != "$ROSBAG_DIR" ] && [ ! -d "$ROSBAG_DIR" ]; then
+      # The staged copy counts only if it holds every file of the bag at the same size:
+      # the scratch purge empties old directories without removing them, and a copy can
+      # stop half way. Either way the copy is redone, over what is there.
+      bag_staged() {
+        local f
+        for f in "$bag_src"/*; do
+          [ "$(stat -c %s "$f")" = "$(stat -c %s "${ROSBAG_DIR}/$(basename "$f")" 2>/dev/null)" ] || return 1
+        done
+      }
+      if [ "$bag_src" != "$ROSBAG_DIR" ] && ! bag_staged; then
         echo "Staging rosbag to scratch: ${bag_src} -> ${ROSBAG_DIR}"
-        fs mkdir -p "$(dirname "$ROSBAG_DIR")"
-        fs cp -r "$bag_src" "$ROSBAG_DIR"
+        fs mkdir -p "$ROSBAG_DIR"
+        fs cp -r "${bag_src}/." "${ROSBAG_DIR}/"
       fi
 
       submit "$DATA_DIR" "CAMERA_FRAME=${CAMERA_FRAME},ROSBAG_DIR=${ROSBAG_DIR}" \
