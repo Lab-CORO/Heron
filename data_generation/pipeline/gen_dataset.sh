@@ -111,6 +111,31 @@ if [ "$MODE" != "create_rm" ]; then
 fi
 [ -f "$SIF" ] || die "container image not found: $SIF (override with --sif)"
 
+# Which generation image is this? Read from its labels (docs/images.md), not its file name:
+#   heron.ros=jazzy  ROS 2 Jazzy + cuRobo v2 (images/generation): every mode but scene;
+#   no heron.* label the older ROS 2 Humble + cuRobo v1 image: scene only, with
+#                    pipeline/curobo_patch/ mounted over its curobo_ros.
+command -v apptainer >/dev/null 2>&1 || module load apptainer 2>/dev/null || true
+command -v apptainer >/dev/null 2>&1 || die "apptainer not found: needed to read the labels of $SIF"
+IMAGE_LABELS="$(apptainer inspect --json --labels "$SIF")" || die "cannot read the labels of $SIF (apptainer inspect)"
+read -r IMAGE_KIND IMAGE_ROS < <(python3 -c '
+import json, sys
+labels = json.load(sys.stdin)["data"]["attributes"].get("labels") or {}
+print(labels.get("heron.image", "-") or "-", labels.get("heron.ros", "-") or "-")
+' <<<"$IMAGE_LABELS") || die "cannot parse the labels of $SIF"
+case "${IMAGE_KIND}/${IMAGE_ROS}" in
+  generation/jazzy)
+    HERON_IMAGE=jazzy
+    [ "$MODE" != "scene" ] || die "le mode scene n'est pas encore disponible avec l'image ROS 2 Jazzy + cuRobo v2 (fonction non portée) ; utilise l'ancienne image avec --sif <data_generation humble.sif>"
+    ;;
+  -/-)
+    HERON_IMAGE=humble
+    [ "$MODE" = "scene" ] || die "$SIF is the ROS 2 Humble image (no heron.* label): it only runs --mode scene now, the other launch files are written for the ROS 2 Jazzy + cuRobo v2 image (images/generation/build.sh)"
+    ;;
+  *) die "$SIF: unknown generation image (heron.image=${IMAGE_KIND}, heron.ros=${IMAGE_ROS})";;
+esac
+echo "Generation image: $SIF ($HERON_IMAGE)"
+
 # Robot and station facts come from heron (CapaciNet/robots, CapaciNet/stations).
 # It validates both files and prints KEY='value' lines; it needs PyYAML, which the
 # cluster's python3 has.
@@ -130,19 +155,20 @@ if [[ "$ARRAY" == *-* ]]; then ARRAY_SPEC="$ARRAY"; else ARRAY_SPEC="1-${ARRAY}"
 # Per-task memory (GB). job.sbatch used a flat 60G for every mode, which measured
 # ~10x actual usage on mode=scene (6.3 GB observed). Default per mode instead, with
 # --mem as an escape hatch; synthetic/scene are curobo_ik+generate_data (measured
-# low), real additionally buffers rosbag/camera data, create_rm builds the full
-# IK database over the whole voxel grid (heaviest, unmeasured -> stays conservative).
+# low), real additionally buffers rosbag/camera data. create_rm streams its poses to the
+# IK (measured at 0.02: 1.3 GB early on, ~3.4 GB of reachable poses kept by the end, plus
+# ~2 GB for the cuRobo node); 16 GB leaves twice that.
 if [ -z "$MEM" ]; then
   case "$MODE" in
     scene|synthetic) MEM=16 ;;
     real)             MEM=32 ;;
-    create_rm)        MEM=40 ;;
+    create_rm)        MEM=16 ;;
     *)                MEM=16 ;;
   esac
 fi
 
 # Common environment forwarded to the job.
-COMMON_EXPORT="ALL,DISABLE_DCGM=1,MODE=${MODE},VOXEL=${VOXEL},DATASET_SIZE=${DATASET_SIZE},BATCH_SIZE=${BATCH_SIZE},INIT_BATCH_SIZE=${INIT_BATCH_SIZE},OBJ_MAX=${OBJ_MAX},REACH_MAX=${REACH_MAX},ROBOT_CONFIG_FILE=${ROBOT_CONFIG_FILE},ROBOT_CONFIG_BIND=${ROBOT_CONFIG_BIND},BASE_LINK=${BASE_LINK},WORLD_FILE=${WORLD_FILE},HERON_SCENE_HALF_EXTENT=${SCENE_HALF_EXTENT},CUROBO_PATCH_DIR=${PIPELINE_DIR}/curobo_patch,LAUNCH_DIR=${LAUNCH_DIR},SIF=${SIF},WARP_CACHE=${WARP_CACHE}"
+COMMON_EXPORT="ALL,DISABLE_DCGM=1,MODE=${MODE},VOXEL=${VOXEL},DATASET_SIZE=${DATASET_SIZE},BATCH_SIZE=${BATCH_SIZE},INIT_BATCH_SIZE=${INIT_BATCH_SIZE},OBJ_MAX=${OBJ_MAX},REACH_MAX=${REACH_MAX},ROBOT_CONFIG_FILE=${ROBOT_CONFIG_FILE},ROBOT_CONFIG_BIND=${ROBOT_CONFIG_BIND},BASE_LINK=${BASE_LINK},WORLD_FILE=${WORLD_FILE},HERON_SCENE_HALF_EXTENT=${SCENE_HALF_EXTENT},HERON_IMAGE=${HERON_IMAGE},CUROBO_PATCH_DIR=${PIPELINE_DIR}/curobo_patch,LAUNCH_DIR=${LAUNCH_DIR},SIF=${SIF},WARP_CACHE=${WARP_CACHE}"
 
 submit() {  # submit <data_dir> <extra_export> <sbatch_opts...>
   local data_dir="$1"; shift
@@ -216,10 +242,19 @@ case "$MODE" in
         sed "s|__CAMERA_FRAME__|${CAMERA_FRAME}|g" "${CAMERAS_TEMPLATE}" > "${DATA_DIR}/cameras.yaml"
       fi
       # Stage rosbag to scratch (fast) once; array tasks copy from there to local SSD.
-      if [ "$bag_src" != "$ROSBAG_DIR" ] && [ ! -d "$ROSBAG_DIR" ]; then
+      # The staged copy counts only if it holds every file of the bag at the same size:
+      # the scratch purge empties old directories without removing them, and a copy can
+      # stop half way. Either way the copy is redone, over what is there.
+      bag_staged() {
+        local f
+        for f in "$bag_src"/*; do
+          [ "$(stat -c %s "$f")" = "$(stat -c %s "${ROSBAG_DIR}/$(basename "$f")" 2>/dev/null)" ] || return 1
+        done
+      }
+      if [ "$bag_src" != "$ROSBAG_DIR" ] && ! bag_staged; then
         echo "Staging rosbag to scratch: ${bag_src} -> ${ROSBAG_DIR}"
-        fs mkdir -p "$(dirname "$ROSBAG_DIR")"
-        fs cp -r "$bag_src" "$ROSBAG_DIR"
+        fs mkdir -p "$ROSBAG_DIR"
+        fs cp -r "${bag_src}/." "${ROSBAG_DIR}/"
       fi
 
       submit "$DATA_DIR" "CAMERA_FRAME=${CAMERA_FRAME},ROSBAG_DIR=${ROSBAG_DIR}" \

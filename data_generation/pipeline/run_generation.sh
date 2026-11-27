@@ -13,10 +13,17 @@
 
 set -e
 
-source /opt/ros/humble/setup.bash
+# The ROS 2 Jazzy + cuRobo v2 image runs every mode but scene; the Humble image is only
+# used for scene (gen_dataset.sh picks, from the image's heron.ros label).
+if [ -f /opt/ros/jazzy/setup.bash ]; then
+  source /opt/ros/jazzy/setup.bash
+  export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST   # ROS_LOCALHOST_ONLY is deprecated in Jazzy
+else
+  source /opt/ros/humble/setup.bash
+  export ROS_LOCALHOST_ONLY=1
+fi
 source /home/ros2_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_LOCALHOST_ONLY=1
 
 DATA_SHARE=/home/ros2_ws/install/data_generation/share/data_generation/data
 
@@ -47,6 +54,12 @@ echo "   ROBOT_CONFIG_FILE=${ROBOT_CONFIG_FILE:-<default>}  BASE_LINK=$BASE_LINK
 echo "   WORLD_FILE=${WORLD_FILE:-<default>}  OBJ_MAX=$OBJ_MAX"
 echo "   ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-n/a}"
 echo "================================================"
+
+# scene_manager leaves this file when it gives up (failed Scenes or Reachability maps), and
+# the launch files when a process the task needs dies (launch/stop_on_death.py); ros2
+# launch itself exits 0 whatever its processes did.
+FAILED_MARK="$DATA_SHARE/generation_failed"
+rm -f "$FAILED_MARK"
 
 case "$MODE" in
   synthetic)
@@ -164,3 +177,8 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+if [ -f "$FAILED_MARK" ]; then
+  echo "ERROR: $(cat "$FAILED_MARK")" >&2
+  exit 1
+fi

@@ -12,6 +12,8 @@
 #include "curobo_msgs/srv/generate_rm.hpp"
 #include <curobo_msgs/srv/get_voxel_grid.hpp>
 #include "curobo_msgs/srv/ik_batch.hpp"
+#include "curobo_msgs/srv/warmup_ik.hpp"
+#include "../include/curobo_node.h"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <ctime>
@@ -51,6 +53,13 @@ namespace cb_data_generator
             this->declare_parameter("voxel_size", 0.5);
             this->get_parameter("voxel_size", voxel_size);
             this->voxel_size = voxel_size;
+            // Half side of the Scene cube (m), from the Station (scene_half_extent).
+            // The voxel grid must hold ceil(2 * scene_half_extent / voxel_size)
+            // voxels per side; curobo_ros sizes it from its own mapper_extent_xyz
+            // parameter, which the launch files set from the same value.
+            this->declare_parameter("scene_half_extent", 1.52);
+            this->get_parameter("scene_half_extent", this->scene_half_extent);
+            this->curobo_node_ = curobo_node::declare(*this);
             std::stringstream resolution_string;
             resolution_string << voxel_size;              // appending the float value to the streamclass
             // Load the reachablity map from the resolution
@@ -66,24 +75,26 @@ namespace cb_data_generator
             {
                 auto res = data_generation(request->batch_size, request->resolution);
                 response->success = res;
-                response->message = "Reachability map generated successfully.";
+                response->message = res ? "Reachability map generated successfully." : "Reachability map generation failed (see generate_data log).";
 
                 return response;
             };
 
-            this->client_ik = this->create_client<curobo_msgs::srv::IkBatch>("/curobo_ik/ik_batch_poses", rmw_qos_profile_services_default,
-                                                                  client_cb_group_);
-            client_voxel_grid = this->create_client<curobo_msgs::srv::GetVoxelGrid>("/curobo_ik/get_voxel_grid", rmw_qos_profile_services_default,
-                                                                                    client_cb_group_);
+            this->client_ik = this->create_client<curobo_msgs::srv::IkBatch>(
+                curobo_node::service(curobo_node_, "ik_batch"), rmw_qos_profile_services_default, client_cb_group_);
+            this->client_warmup_ik = this->create_client<curobo_msgs::srv::WarmupIK>(
+                curobo_node::service(curobo_node_, "warmup_ik"), rmw_qos_profile_services_default, client_cb_group_);
+            client_voxel_grid = this->create_client<curobo_msgs::srv::GetVoxelGrid>(
+                curobo_node::service(curobo_node_, "get_voxel_grid"), rmw_qos_profile_services_default, client_cb_group_);
             while (!this->client_ik->wait_for_service(std::chrono::seconds(5)))
             {
                 if (!rclcpp::ok()) {
                     RCLCPP_ERROR(this->get_logger(), "client interrupted while waiting for service to appear.");
                 return ;
                 }
-                RCLCPP_WARN(this->get_logger(), "/client_ik service is not available, retrying...");
+                RCLCPP_WARN(this->get_logger(), "%s is not available, retrying...", client_ik->get_service_name());
             }
-            RCLCPP_INFO(this->get_logger(), "/client_ik service is now available.");
+            RCLCPP_INFO(this->get_logger(), "%s is now available.", client_ik->get_service_name());
 
             service_ = this->create_service<curobo_msgs::srv::GenerateRM>(
                 "generate_rm",
@@ -94,12 +105,53 @@ namespace cb_data_generator
 
         ~DataGenerator()
         {
-            this->data_file_->flush();
+            if (this->data_file_) // never opened when no Reachability map was asked for
+            {
+                this->data_file_->flush();
+            }
             RCLCPP_INFO(this->get_logger(), "DataGenerator is shutting down.");
         }
         
         bool load_reachability_map(float voxel_size)
         {
+            return true;
+        }
+
+        /**
+         * @brief Make sure the cuRobo v2 IK solver exists for batches of `batch_size` poses.
+         *
+         * curobo_ros v2 creates its IK solver only on warmup_ik, and recreates it whenever a
+         * batch of another size arrives (see ik_services.py). Warm it up once here, and pad
+         * every batch to `batch_size` (data_generation()), so the solver is built once per run.
+         */
+        bool ensure_ik_ready(int batch_size)
+        {
+            if (this->ik_batch_size_ == batch_size)
+            {
+                return true;
+            }
+            if (!client_warmup_ik->wait_for_service(std::chrono::seconds(30)))
+            {
+                RCLCPP_ERROR(this->get_logger(), "%s not available", client_warmup_ik->get_service_name());
+                return false;
+            }
+            auto request = std::make_shared<curobo_msgs::srv::WarmupIK::Request>();
+            request->batch_size = batch_size;
+            RCLCPP_INFO(this->get_logger(), "Warming up the IK solver for batches of %d poses...", batch_size);
+            auto future = client_warmup_ik->async_send_request(request);
+            // Building the solver compiles its kernels on the first run: allow minutes.
+            if (future.wait_for(600s) != std::future_status::ready)
+            {
+                RCLCPP_ERROR(this->get_logger(), "IK warmup timed out");
+                return false;
+            }
+            auto res = future.get();
+            if (!res->success)
+            {
+                RCLCPP_ERROR(this->get_logger(), "IK warmup failed: %s", res->message.c_str());
+                return false;
+            }
+            this->ik_batch_size_ = batch_size;
             return true;
         }
 
@@ -116,6 +168,10 @@ namespace cb_data_generator
             std::vector<std::vector<geometry_msgs::msg::Pose>> batches;
 
             utils::split_data(this->raw_datas, batch_size, batches);
+            if (!ensure_ik_ready(batch_size))
+            {
+                return false;
+            }
             // print batch size
             RCLCPP_WARN(this->get_logger(), "Number of Batch: %i", batches.size());
             RCLCPP_WARN(this->get_logger(), "Data size: %i", this->raw_datas.size());
@@ -133,15 +189,27 @@ namespace cb_data_generator
                 auto request = std::make_shared<curobo_msgs::srv::IkBatch::Request>();
 
                 request->poses = batch;
+                // Pad the last, shorter batch with copies of its last pose: a batch of another
+                // size would make curobo_ros rebuild its IK solver. The padding is ignored below.
+                while ((int)request->poses.size() < batch_size)
+                {
+                    request->poses.push_back(batch.back());
+                }
                 auto result_future = this->client_ik->async_send_request(request);
 
-                std::future_status status = result_future.wait_for(10s); // timeout to guarantee a graceful finish
+                std::future_status status = result_future.wait_for(120s); // timeout to guarantee a graceful finish
                 if (status == std::future_status::ready)
                 {
                     auto res = result_future.get();
                     if (!res->success)
                     {
-                        RCLCPP_ERROR(this->get_logger(), "Ik batch failed");
+                        RCLCPP_ERROR(this->get_logger(), "Ik batch failed: %s", res->error_msg.data.c_str());
+                        return false;
+                    }
+                    if (res->joint_states_valid.size() < batch.size())
+                    {
+                        RCLCPP_ERROR(this->get_logger(), "Ik batch returned %zu results for %zu poses",
+                                     res->joint_states_valid.size(), batch.size());
                         return false;
                     }
                     joint_states = res->joint_states;
@@ -153,7 +221,7 @@ namespace cb_data_generator
                     return false;
                 }
 
-                for (size_t i = 0; i < joint_states.size(); ++i)
+                for (size_t i = 0; i < batch.size(); ++i)
                 {
                     // get the x, y, z and if joint state valide, add 1 to score 
                     utils::QuantizedPoint3D pt(batch[i].position.x, batch[i].position.y, batch[i].position.z, resolution);
@@ -179,7 +247,10 @@ namespace cb_data_generator
 
             start_time = std::chrono::high_resolution_clock::now();
 
-            this->get_voxel_map(voxel_map, voxel_grid_sizes, voxel_grid_origin);
+            if (!this->get_voxel_map(voxel_map, voxel_grid_sizes, voxel_grid_origin))
+            {
+                return false;
+            }
 
             // End the timer
             end_time = std::chrono::high_resolution_clock::now();
@@ -209,25 +280,46 @@ namespace cb_data_generator
          * @brief Generate the voxel grid. Here we generate the voxel grid to save it. For AI porpuse, an occupied voxel is 0 and a free voxel is 1.
          */
 
-        void get_voxel_map(std::vector<std::array<double, 4>> &voxel_grid, int (&voxel_grid_sizes)[3], double (&voxel_grid_origin)[3])
+        bool get_voxel_map(std::vector<std::array<double, 4>> &voxel_grid, int (&voxel_grid_sizes)[3], double (&voxel_grid_origin)[3])
         {
-            // Create a client for the `/get_voxel_grid` service
-
             // Wait for the service to be available
             if (!client_voxel_grid->wait_for_service(std::chrono::seconds(5)))
             {
-                RCLCPP_WARN(this->get_logger(), "/get_voxel_grid service not available. Retrying...");
-                return;
+                RCLCPP_ERROR(this->get_logger(), "%s not available", client_voxel_grid->get_service_name());
+                return false;
             }
 
-            // Send an empty request
+            // The Scene cube, in the robot base frame. curobo_ros 06aef20 does not read this box
+            // yet (it sizes the grid from its mapper_extent_xyz parameter); it is filled so the
+            // request means the same thing once it does, and the size is checked below either way.
             auto request = std::make_shared<curobo_msgs::srv::GetVoxelGrid::Request>();
+            const double h = this->scene_half_extent;
+            request->bbox_min_x = -h;
+            request->bbox_min_y = -h;
+            request->bbox_min_z = -h;
+            request->bbox_max_x = h;
+            request->bbox_max_y = h;
+            request->bbox_max_z = h;
             // Call the service asynchronously
             auto result_future = client_voxel_grid->async_send_request(request);
-            std::future_status status = result_future.wait_for(10s); // timeout to guarantee a graceful finish
+            std::future_status status = result_future.wait_for(120s); // timeout to guarantee a graceful finish
             if (status == std::future_status::ready)
             {
                 auto response = result_future.get();
+                // ceil, as curobo_ros (and the Humble patch) size the grid; the margin absorbs
+                // float error (2 * 1.52 / 0.02f = 152.0000034 -> 152, not 153).
+                const long expected = (long)std::ceil(2.0 * h / this->voxel_size - 1e-3);
+                const auto &g = response->voxel_grid;
+                if ((long)g.size_x != expected || (long)g.size_y != expected || (long)g.size_z != expected ||
+                    g.data.size() != (size_t)g.size_x * g.size_y * g.size_z)
+                {
+                    RCLCPP_ERROR(this->get_logger(),
+                                 "voxel grid is %ux%ux%u (%zu values), expected %ld^3 for scene_half_extent=%.3f m "
+                                 "at voxel_size=%.3f m: set mapper_extent_xyz of %s to 2 * scene_half_extent",
+                                 g.size_x, g.size_y, g.size_z, g.data.size(), expected, h, this->voxel_size,
+                                 this->curobo_node_.c_str());
+                    return false;
+                }
 
                 // Iterate through the voxel grid data and add points for occupied voxels
                 int index = 0;
@@ -256,9 +348,10 @@ namespace cb_data_generator
             }
             else
             {
-                RCLCPP_ERROR(this->get_logger(), "Failed to call /get_voxel_grid service.");
-                return;
+                RCLCPP_ERROR(this->get_logger(), "Failed to call %s.", client_voxel_grid->get_service_name());
+                return false;
             }
+            return true;
         }
 
 
@@ -272,6 +365,10 @@ namespace cb_data_generator
         rclcpp::Service<curobo_msgs::srv::GenerateRM>::SharedPtr service_;
         rclcpp::Client<curobo_msgs::srv::IkBatch>::SharedPtr client_ik;
         rclcpp::Client<curobo_msgs::srv::GetVoxelGrid>::SharedPtr client_voxel_grid;
+        rclcpp::Client<curobo_msgs::srv::WarmupIK>::SharedPtr client_warmup_ik;
+        std::string curobo_node_;
+        double scene_half_extent = 1.52;
+        int ik_batch_size_ = 0; // batch size the cuRobo IK solver is warmed up for (0 = not yet)
 
         std::shared_ptr<HighFive::File> data_file_;
         std::string data_file_path;
@@ -286,6 +383,10 @@ int main(int argc, char *argv[])
 {
     rclcpp::init(argc, argv);
     auto client_node = std::make_shared<cb_data_generator::DataGenerator>();
+    if (!curobo_node::wait_until_ready(client_node, client_node->get_parameter("curobo_node").as_string()))
+    {
+        return 1;
+    }
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(client_node);
 

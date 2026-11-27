@@ -19,15 +19,17 @@
 # Expected environment (exported by gen_dataset.sh):
 #   MODE, VOXEL, DATASET_SIZE, BATCH_SIZE, INIT_BATCH_SIZE, OBJ_MAX, REACH_MAX,
 #   ROBOT_CONFIG_FILE, BASE_LINK, WORLD_FILE, CAMERA_FRAME
-#   HERON_SCENE_HALF_EXTENT  station scene half extent (m), read by the patched obstacle_manager.py
+#   HERON_SCENE_HALF_EXTENT  station scene half extent (m), read by the launch files (Jazzy image)
+#                    or by the patched obstacle_manager.py (Humble image)
+#   HERON_IMAGE      jazzy | humble: which generation image SIF is (gen_dataset.sh reads its labels)
 #   ROBOT_CONFIG_BIND  host dir of a robot config that is not built into the image (may be empty)
 #   DATA_DIR         host dir bound to .../share/data_generation/data (assets + output)
 #   LAUNCH_DIR       host dir bound to .../share/data_generation/launch (parametrized launches)
 #   SIF              path to data_generation.sif
 #   WARP_CACHE       host warp cache dir
 #   ROSBAG_DIR       (real only) host rosbag directory to stage to local SSD
-#   CUROBO_PATCH_DIR host dir with obstacle_manager.py / ros_service_manager.py, bind-mounted
-#                    over curobo_ros's installed copies without rebuilding the .sif.
+#   CUROBO_PATCH_DIR (Humble image only) host dir with obstacle_manager.py / ros_service_manager.py,
+#                    bind-mounted over curobo_ros's installed copies without rebuilding the .sif.
 #                    See pipeline/curobo_patch/README.md.
 
 module load apptainer
@@ -80,11 +82,15 @@ if [ "${MODE}" != "create_rm" ] && [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
   DATA_BIND_SRC="${TASK_DIR}"
 fi
 
+mkdir -p "${WARP_CACHE}"
 BINDS=(
   --bind "${DATA_BIND_SRC}":"${CONTAINER_DATA}"
   --bind "${LAUNCH_DIR}":"${CONTAINER_LAUNCH}"
   --bind "${SLURM_TMPDIR}":/tmp
-  --bind "${WARP_CACHE}":/home/willore/.cache/warp
+  # warp (cuRobo's collision kernels) caches what it compiles in ~/.cache/warp. Under -C the
+  # container's HOME is an empty in-memory directory at the host's $HOME path, so mount a
+  # persistent cache there.
+  --bind "${WARP_CACHE}":"${HOME}/.cache/warp"
 )
 
 if [ "${MODE}" = "real" ]; then
@@ -93,16 +99,22 @@ if [ "${MODE}" = "real" ]; then
   BINDS+=( --bind "${SLURM_TMPDIR}/rosbag":/home/ros2_ws/rosbag )
 fi
 
-# curobo_ros files patched without rebuilding the image (see curobo_patch/README.md).
-# obstacle_manager.py reads the station's scene extent (HERON_SCENE_HALF_EXTENT), so
-# every mode needs it; ros_service_manager.py only adds the scene-mode service.
-CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
-PATCHED=( obstacle_manager.py )
-[ "${MODE}" = "scene" ] && PATCHED+=( ros_service_manager.py )
-for f in "${PATCHED[@]}"; do
-  [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
-  BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
-done
+# Humble image only: curobo_ros files patched without rebuilding the image (see
+# curobo_patch/README.md). obstacle_manager.py reads the station's scene extent
+# (HERON_SCENE_HALF_EXTENT); ros_service_manager.py adds the scene-mode service.
+# The Jazzy image needs no patch: the launch files pass the extent to curobo_ros.
+if [ "${HERON_IMAGE:-}" = "humble" ]; then
+  CUROBO_INSTALL=/home/ros2_ws/install/curobo_ros/lib/python3.10/site-packages/curobo_ros/core
+  PATCHED=( obstacle_manager.py )
+  [ "${MODE}" = "scene" ] && PATCHED+=( ros_service_manager.py )
+  for f in "${PATCHED[@]}"; do
+    [ -f "${CUROBO_PATCH_DIR}/${f}" ] || { echo "ERROR: missing ${CUROBO_PATCH_DIR}/${f}" >&2; exit 1; }
+    BINDS+=( --bind "${CUROBO_PATCH_DIR}/${f}":"${CUROBO_INSTALL}/${f}" )
+  done
+elif [ "${HERON_IMAGE:-}" != "jazzy" ]; then
+  echo "ERROR: HERON_IMAGE='${HERON_IMAGE:-}' (expected jazzy or humble; submit through gen_dataset.sh)" >&2
+  exit 1
+fi
 # A robot whose curobo config lives on the host: mount its directory (config, URDF,
 # meshes) at the same path, so absolute paths inside the config keep working.
 if [ -n "${ROBOT_CONFIG_BIND:-}" ]; then
@@ -133,6 +145,9 @@ stop_container() {
   kill -KILL -- "-${APPTAINER_PID}" 2>/dev/null
 }
 trap stop_container USR1
+
+# create_rm writes its master map only at the very end; anything older is a previous run's.
+START_MARK="$(mktemp "${SLURM_TMPDIR:-/tmp}/heron_start.XXXXXX")"
 
 echo "Launching apptainer (MODE=${MODE}, task=${SLURM_ARRAY_TASK_ID:-n/a})..."
 setsid -w apptainer exec -C --net --network=none --nv \
@@ -175,6 +190,18 @@ if [ -n "${TASK_DIR:-}" ]; then
   rm -rf "${TASK_DIR}"                      # hardlinks only; originals in DATA_DIR untouched
   rmdir "${DATA_DIR}/.tasks" 2>/dev/null || true
 fi
+
+# ros2 launch exits 0 when a required node dies (it just shuts the rest down): a
+# create_rm killed for lack of memory used to report status=0. Require the master map.
+if [ "${MODE}" = "create_rm" ] && [ "${STATUS}" -eq 0 ]; then
+  for ext in npz h5; do
+    if [ -z "$(find "${DATA_DIR}" -maxdepth 1 -name "master_ik_data*.${ext}" -newer "${START_MARK}" -print -quit)" ]; then
+      echo "ERROR: create_rm wrote no master_ik_data*.${ext} in ${DATA_DIR} (crashed? out of memory? see the log above)" >&2
+      STATUS=1
+    fi
+  done
+fi
+rm -f "${START_MARK}"
 
 echo "Job task ${SLURM_ARRAY_TASK_ID:-n/a} completed (MODE=${MODE}, status=${STATUS})."
 exit "${STATUS}"
