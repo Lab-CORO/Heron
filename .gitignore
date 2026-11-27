@@ -49,3 +49,30 @@ qtcreator-*
 
 # Catkin custom files
 CATKIN_IGNORE
+
+# Python
+__pycache__/
+
+# Training artifacts, datasets and container images (too heavy for git)
+*.pytorch
+*.pt
+*.zip
+*.h5
+*.npz
+*.sif
+
+# Per-user config
+.idea/
+.tasks/
+site.env
+
+# Master IK map installed by CMakeLists.txt (~2.2 GB)
+data_generation/data/*
+!data_generation/data/.gitkeep
+
+# Python tooling
+.pytest_cache/
+*.egg-info/
+
+# Site settings (personal accounts and paths)
+site.yaml

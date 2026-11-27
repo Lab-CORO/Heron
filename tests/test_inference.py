@@ -1,0 +1,230 @@
+from datetime import datetime
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+import yaml
+
+from heron import training
+from heron.cli import main
+from heron.errors import HeronConfigError
+from heron.evaluation import jobs as eval_jobs, measure
+from heron.inference import benchmark, engine, jobs, package, timing
+from heron.site import load_site
+
+SHAPE = (16, 16, 16)
+
+
+def config(patch=SHAPE, train_dir=None) -> dict:
+    slice_builder = {"name": "SliceBuilder", "patch_shape": list(patch), "stride_shape": list(patch)}
+    return {
+        "model": {"name": "UNet3D", "in_channels": 1, "out_channels": 1, "final_sigmoid": True,
+                  "f_maps": [4, 8], "layer_order": "cbr"},
+        "loaders": {"global_normalization": False,
+                    "train": {"file_paths": [str(train_dir)] if train_dir else [], "slice_builder": slice_builder,
+                              "transformer": training.TRANSFORMS},
+                    "val": {"file_paths": [], "slice_builder": slice_builder, "transformer": training.TRANSFORMS}},
+    }
+
+
+def write_raw(path: Path, shape=SHAPE, seed=0):
+    with h5py.File(path, "w") as f:
+        f.create_dataset("raw", data=(np.random.RandomState(seed).rand(*shape) < 0.2).astype(np.float64))
+
+
+@pytest.fixture
+def tiny_experiment(tmp_path):
+    """A legacy-style Experiment: config.yaml naming its train data, a checkpoint, no experiment.yaml."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("pytorch3dunet")
+    from pytorch3dunet.unet3d.model import get_model
+    train = tmp_path / "train"
+    train.mkdir()
+    for i in range(5):
+        write_raw(train / f"s{i}.h5", seed=i)
+    exp = tmp_path / "tiny_20261026_1000"
+    (exp / "checkpoint").mkdir(parents=True)
+    cfg = config(train_dir=train)
+    (exp / "config.yaml").write_text(yaml.safe_dump(cfg))
+    torch.save({"model_state_dict": get_model(cfg["model"]).state_dict()}, exp / "checkpoint" / "best_checkpoint.pytorch")
+    return exp
+
+
+# --- package ----------------------------------------------------------------------------------
+
+def test_the_input_is_the_val_patch():
+    assert package.input_shape(config(patch=(128, 128, 128))) == (128, 128, 128)
+    with pytest.raises(HeronConfigError, match="patch_shape"):
+        package.input_shape({"loaders": {}})
+
+
+def test_calibration_volumes_are_spread_over_the_train_part():
+    files = [Path(f"{i:03d}.h5") for i in range(10)]
+    assert package.pick(files, 3) == [Path("000.h5"), Path("004.h5"), Path("009.h5")]
+    assert package.pick(files[:2], 3) == files[:2]
+
+
+def test_export_writes_a_portable_package(tiny_experiment):
+    pytest.importorskip("onnx")
+    out = package.export(tiny_experiment, samples=3, log=lambda *_: None)
+    assert out == tiny_experiment / "package"
+    manifest = package.load(out)
+    assert manifest["experiment"] == tiny_experiment.name and manifest["checkpoint"] == "best"
+    assert manifest["input_shape"] == list(SHAPE) and manifest["calibration"]["volumes"] == 3
+    with h5py.File(out / package.CALIBRATION) as f:
+        assert f["raw"].shape == (3, *SHAPE) and f["raw"].dtype == np.float32
+    import onnx
+    dims = [d.dim_value for d in onnx.load(str(out / package.ONNX)).graph.input[0].type.tensor_type.shape.dim]
+    assert dims == [1, 1, *SHAPE]
+    with pytest.raises(HeronConfigError, match="already exists"):
+        package.export(tiny_experiment, log=lambda *_: None)
+    (out / package.ENGINES).mkdir()
+    package.export(tiny_experiment, samples=2, force=True, log=lambda *_: None)
+    assert not (out / package.ENGINES).exists() and package.load(out)["calibration"]["volumes"] == 2
+
+
+def test_export_refuses_calibration_volumes_of_another_shape(tiny_experiment, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    write_raw(other / "big.h5", shape=(32, 32, 32))
+    with pytest.raises(HeronConfigError, match="the network takes"):
+        package.export(tiny_experiment, calibration=other, log=lambda *_: None)
+    assert not (tiny_experiment / "package").exists() and not (tiny_experiment / "package.partial").exists()
+
+
+def test_export_without_train_data_asks_for_it(tiny_experiment, tmp_path):
+    for f in (tmp_path / "train").glob("*.h5"):
+        f.unlink()
+    with pytest.raises(HeronConfigError, match="--calibration"):
+        package.export(tiny_experiment, log=lambda *_: None)
+
+
+# --- engines ----------------------------------------------------------------------------------
+
+def test_int8_is_refused_where_implicit_calibration_is_gone():
+    engine.check_version("10.16.2", "int8")
+    engine.check_version("11.4.0", "fp16")
+    with pytest.raises(HeronConfigError, match="explicit"):
+        engine.check_version("11.4.0", "int8")
+    with pytest.raises(HeronConfigError, match="TensorRT 10"):
+        engine.check_version("8.6.1", "fp32")
+
+
+def test_an_engine_is_cached_per_gpu_tensorrt_and_precision(tmp_path):
+    assert engine.engine_path(tmp_path, "fp16", "NVIDIA A100-SXM4-40GB", "10.16.1.11") == \
+        tmp_path / "engines" / "nvidia-a100-sxm4-40gb_trt10.16.1.11_fp16.engine"
+
+
+# --- timing -----------------------------------------------------------------------------------
+
+def test_timing_reports_both_measures_over_the_samples():
+    pytest.importorskip("pytorch3dunet")
+    calls = []
+
+    def network(x):
+        calls.append(tuple(x.shape))
+        return x
+    predictor = measure.Predictor(config(), None, network=network)
+    result = timing.time_predictor(predictor, timing.volumes(SHAPE, n=2), samples=5, warmup=2)
+    assert len(calls) == 7 and calls[0] == (1, 1, *SHAPE)
+    for kind in ("inference", "end_to_end"):
+        assert set(result[kind]) == {"median_ms", "p95_ms", "mean_ms", "min_ms", "per_second"}
+    assert result["end_to_end"]["median_ms"] >= result["inference"]["median_ms"]
+
+
+def test_the_machine_description_can_be_written_as_yaml():
+    torch = pytest.importorskip("torch")
+    info = timing.machine(torch)
+    assert yaml.safe_load(yaml.safe_dump(info))["torch"] == str(torch.__version__)
+
+
+def test_speedup_is_against_the_pytorch_median():
+    base = {"inference": {"median_ms": 30.0}, "end_to_end": {"median_ms": 40.0}}
+    run = {"inference": {"median_ms": 10.0}, "end_to_end": {"median_ms": 20.0}}
+    assert benchmark.speedup(base, run) == {"inference": 3.0, "end_to_end": 2.0}
+
+
+# --- host side: the benchmark job, the evaluation with precisions -----------------------------
+
+@pytest.fixture
+def experiment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERON_DATA_ROOT", str(tmp_path))
+    corpus = tmp_path / "corpora" / "full"
+    for part in ("train", "val"):
+        (corpus / part).mkdir(parents=True)
+        (corpus / part / "a.h5").write_bytes(b"")
+    (corpus / "corpus.yaml").write_text(yaml.safe_dump({"name": "full", "crop": [[0, 128]] * 3,
+                                                        "parts": {"train": {"samples": 8}, "val": {"samples": 4}}}))
+    (tmp_path / "capa_unet.sif").write_bytes(b"")
+    recipe = tmp_path / "cbr.yaml"
+    recipe.write_text("name: cbr\ncorpus: full\n")
+    return training.create(training.plan(training.load_training_recipe(recipe), load_site(),
+                                         now=datetime(2026, 10, 26, 10, 0)))
+
+
+def fake_package(experiment: Path) -> Path:
+    out = package.default_package(experiment)
+    out.mkdir()
+    for name in (package.CONFIG, package.CHECKPOINT, package.ONNX):
+        (out / name).write_bytes(b"")
+    (out / package.MANIFEST).write_text(yaml.safe_dump({"experiment": experiment.name, "checkpoint": "best",
+                                                        "input_shape": [128] * 3}))
+    return out
+
+
+def test_benchmark_job_times_the_package_in_the_training_runtime(experiment):
+    pkg = fake_package(experiment)
+    script = jobs.write_benchmark_job(pkg, ["fp16", "int8"], load_site(), samples=100).read_text()
+    assert f"python -m heron.inference.benchmark --package {pkg} --precision fp16 int8 --samples 100" in script
+    assert f"--results-dir {jobs.results_dir(experiment.name)}" in script
+    assert "capa_unet.sif" in script and "--gpus-per-node=1" in script
+
+
+def test_benchmark_takes_an_experiment_or_a_package(experiment, capsys):
+    with pytest.raises(HeronConfigError, match="heron export"):
+        package.find_package(experiment.name)
+    pkg = fake_package(experiment)
+    assert package.find_package(experiment.name) == pkg == package.find_package(str(pkg))
+    assert main(["benchmark", experiment.name, "--dry-run"]) == 0
+    assert "--precision fp32 fp16 int8 --samples 1000 --warmup 50" in capsys.readouterr().out
+
+
+def test_evaluate_passes_the_precisions_to_the_measurement(experiment):
+    script = eval_jobs.write_eval_job(experiment, load_site(), precisions=["fp16", "int8"], samples=10).read_text()
+    assert "--precision fp16 int8 --samples 10" in script
+
+
+def test_engine_quality_is_reported_as_a_delta_from_pytorch(tmp_path, monkeypatch):
+    exp = tmp_path / "exp_20261026_1000"
+    exp.mkdir()
+    (exp / "config.yaml").write_text("model: {}\nloaders: {}\n")
+    val = tmp_path / "val"
+    val.mkdir()
+    label = np.full((8, 8, 8), 0.5)
+    with h5py.File(val / "a.h5", "w") as f:
+        f["raw"], f["label"] = np.zeros_like(label), label
+
+    class Constant:
+        def __init__(self, value):
+            self.value = value
+
+        def predict(self, raw):
+            return np.full(raw.shape, self.value, dtype=np.float32)
+    monkeypatch.setattr(measure, "Predictor", lambda config, ckpt: Constant(0.5))
+    monkeypatch.setattr(measure, "tensorrt_package", lambda *a, **k: tmp_path / "package")
+    runs = {"pytorch_fp32": {"inference": {"median_ms": 9.0}}}
+    monkeypatch.setattr(benchmark, "run", lambda *a, **k: {"machine": {"gpu": "A100"}, "samples": 3, "warmup": 1,
+                                                           "volumes": "", "tf32": False, "runs": runs})
+    monkeypatch.setattr(benchmark, "table", lambda r: "")
+    monkeypatch.setattr(benchmark, "tensorrt_predictor", lambda *a, **k: (Constant(0.6), None, None))
+    results = tmp_path / "results.yaml"
+    measure.run(exp, exp / "best_checkpoint.pytorch", {"val": val}, results, ["fp16"], log=lambda *_: None)
+
+    summary = yaml.safe_load(results.read_text())
+    assert summary["timing"]["runs"] == runs
+    trt = summary["tensorrt"]["tensorrt_fp16"]
+    assert trt["parts"]["val"]["regression"]["MAE"] == pytest.approx(0.1)
+    assert trt["delta"]["val"]["regression"]["MAE"] == pytest.approx(0.1)
+    assert "voxels" not in trt["delta"]["val"]
+    assert (exp / "evaluation" / "tensorrt_fp16" / "val" / "eval_data.h5").is_file()

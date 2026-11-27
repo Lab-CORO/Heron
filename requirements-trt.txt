@@ -1,0 +1,20 @@
+# TensorRT inference (heron export / benchmark / evaluate --precision), on top of requirements-train.txt.
+# TensorRT is pinned to 10.16, the version of JetPack 7.2 (Jetson Orin), so the cluster and the
+# Orin build their engines with the same optimizer. Not 11: it removed the implicit int8
+# calibration heron uses (heron refuses int8 under 11).
+#
+#   cluster venv:  pip install -e '.[trt]'
+#     On Alliance clusters, pip refuses manylinux wheels and NVIDIA ships the TensorRT Python
+#     bindings only as one, so install that wheel by hand first (docs/images.md, TensorRT):
+#       pip download --no-deps --only-binary=:all: --platform manylinux_2_28_x86_64 \
+#           --python-version 3.11 --implementation cp --index-url https://pypi.nvidia.com \
+#           tensorrt-cu13-bindings==10.16.1.11 -d /tmp/trt
+#       mv /tmp/trt/tensorrt_cu13_bindings-10.16.1.11-cp311-none-{manylinux_2_28,linux}_x86_64.whl
+#       pip install --no-deps /tmp/trt/tensorrt_cu13_bindings-10.16.1.11-cp311-none-linux_x86_64.whl
+#       pip install --no-index onnx && pip install -e '.[trt]'
+#   Jetson:        TensorRT comes with JetPack; a venv made with --system-site-packages sees it.
+#                  onnx and onnxscript are not needed there (the package already holds model.onnx).
+# onnxscript comes from PyPI: the Alliance wheel (0.5) is too old for torch 2.14's exporter.
+tensorrt-cu13==10.16.*
+onnx
+onnxscript>=0.7

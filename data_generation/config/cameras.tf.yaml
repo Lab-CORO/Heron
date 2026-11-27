@@ -1,0 +1,20 @@
+# TF-based camera config for REAL data generation.
+#
+# extrinsics: []  -> curobo_ros resolves the camera pose from TF
+#                    (lookup_transform base_link -> frame_id), see
+#                    curobo_ros/cameras/camera_strategy.py:_parse_extrinsics.
+# frame_id        -> the camera optical frame name. This file is a TEMPLATE: the
+#                    placeholder __CAMERA_FRAME__ is substituted at staging time by
+#                    gen_dataset.sh (from --camera-frame) into datasets/<out>/cameras.yaml.
+#
+# This requires /tf and /tf_static to be played from the rosbag (handled by
+# generate_real_data.launch.py).
+
+cameras:
+  - name: depth_map_test
+    type: depth_camera
+    topic: /masked_depth_image/image_raw
+    frame_id: "__CAMERA_FRAME__"
+    camera_info: /masked_depth_image/camera_info
+    intrinsics: []
+    extrinsics: []

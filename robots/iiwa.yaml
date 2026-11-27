@@ -1,0 +1,5 @@
+# KUKA LBR iiwa, from the configs shipped with curobo.
+name: iiwa
+curobo_config: iiwa.yml
+base_link: base_link
+reach: 2.0      # m, half side of the master map cube

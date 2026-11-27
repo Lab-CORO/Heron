@@ -1,0 +1,5 @@
+# Kinova Jaco 7-DOF, from the configs shipped with curobo.
+name: jaco7
+curobo_config: jaco7.yml
+base_link: base_link
+reach: 2.0      # m, half side of the master map cube

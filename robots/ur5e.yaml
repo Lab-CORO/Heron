@@ -1,0 +1,5 @@
+# Universal Robots UR5e, from the configs shipped with curobo.
+name: ur5e
+curobo_config: ur5e.yml
+base_link: base_link
+reach: 2.0      # m, half side of the master map cube

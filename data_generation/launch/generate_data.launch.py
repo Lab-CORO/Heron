@@ -16,6 +16,8 @@ def generate_launch_description():
     scene_stabilization_max_delay_sec = LaunchConfiguration('scene_stabilization_max_delay_sec')
     world_file = LaunchConfiguration('world_file')
     cameras_config_file = LaunchConfiguration('cameras_config_file')
+    robot_config_file = LaunchConfiguration('robot_config_file')
+    base_link = LaunchConfiguration('base_link')
 
     voxel_size_arg = DeclareLaunchArgument(
         'voxel_size',
@@ -61,6 +63,15 @@ def generate_launch_description():
         'cameras_config_file',
         default_value="/home/ros2_ws/src/CapaciNet/data_generation/config/cameras.yaml",
     )
+    # Robot selection: empty robot_config_file -> curobo falls back to its default (m1013 / leeloo)
+    robot_config_file_arg = DeclareLaunchArgument(
+        'robot_config_file',
+        default_value="",
+    )
+    base_link_arg = DeclareLaunchArgument(
+        'base_link',
+        default_value="base_0",  # curobo ConfigManager legacy default (m1013/leeloo)
+    )
     return LaunchDescription([
         init_batch_size_arg,
         voxel_size_arg,
@@ -73,6 +84,8 @@ def generate_launch_description():
         scene_stabilization_max_delay_sec_arg,
         world_file_arg,
         cameras_config_file_arg,
+        robot_config_file_arg,
+        base_link_arg,
         # Launch the curobo_ik node
         Node(
             package='curobo_ros',
@@ -83,7 +96,9 @@ def generate_launch_description():
                 {"voxel_size": voxel_size,
                 "init_batch_size": init_batch_size,
                 "world_file": world_file,
-                "cameras_config_file": cameras_config_file}
+                "cameras_config_file": cameras_config_file,
+                "robot_config_file": robot_config_file,
+                "base_link": base_link}
             ]
         ),
         # Launch the obstacle_adder node

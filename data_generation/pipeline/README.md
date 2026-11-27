@@ -1,0 +1,226 @@
+# Unified data-generation pipeline
+
+One command to generate CapaciNet datasets — **real** (from a rosbag),
+**synthetic**, or **scene** (from occupancy grids you already have), for **any
+robot** (m1013, ur5e, jaco7, iiwa…) in any **station** (leeloo, bare…) — and to
+(re)build a robot's master map.
+
+```
+data_generation/pipeline/
+  gen_dataset.sh      # the single entry point (run on a login node; submits SLURM)
+  job.sbatch          # generic SLURM job (don't run directly)
+  run_generation.sh   # in-container launcher (staged into the data dir)
+  split_scenes.py     # (scene mode) host-side: scenes.h5 -> one .npz per scene
+  load_scene.py       # (scene mode) in-container: inject scene into curobo, trigger RM
+  curobo_patch/       # curobo_ros files bind-mounted over the .sif's copies (see its README)
+```
+
+Robots and stations are described once, at the repository root, in
+`robots/<name>.yaml` and `stations/<name>.yaml`, and read through the `heron`
+package (see `GLOSSARY.md` for the terms). List and inspect them with:
+
+```bash
+PYTHONPATH=CapaciNet python3 -m heron robots             # m1013, ur5e, iiwa, jaco7
+PYTHONPATH=CapaciNet python3 -m heron stations leeloo    # scene grid and 128³ crop at 0.02
+```
+
+## Usage
+
+```bash
+# Real dataset from a rosbag (camera extrinsics resolved from /tf):
+CapaciNet/data_generation/pipeline/gen_dataset.sh \
+    --robot m1013 --station leeloo --mode real \
+    --rosbag /path/rosbag2_2026_06_02-20_58_42_0.db3 \
+    --camera-frame <camera_optical_frame> \
+    --array 100 --dataset-size 10 --out real_long
+
+# Synthetic dataset for another robot:
+gen_dataset.sh --robot ur5e --station bare --mode synthetic --array 500 --obj-max 20 --out ur5e_syn
+
+# (Re)generate a robot's master_ik_data<voxel>.npz (run once per robot/voxel):
+gen_dataset.sh --robot jaco7 --mode create_rm --voxel 0.02
+
+# Dataset from scenes you already have as occupancy grids (one array task per scene):
+gen_dataset.sh --robot m1013 --station leeloo --mode scene \
+    --scene-file /path/scenes.h5 --out scene_batch1
+```
+
+`--station` is required for every mode except `create_rm`, since a master map
+belongs to the robot alone. New master maps are written to
+`<data root>/master_maps/<robot>/<voxel>/`; maps generated before that
+(`data/`, `data_ur5e/`, `data_iiwa/`, `data_jaco7/`) are still found.
+`HERON_DATA_ROOT` sets the data root (default: the directory containing `CapaciNet/`).
+
+Add `--dry-run` to print the `sbatch` command and the staging steps without
+submitting or touching the filesystem. `--help` lists all options.
+
+### Key options
+`--robot` `--station` `--mode {real|synthetic|scene|create_rm}` `--out <name>` `--rosbag <path>`
+`--camera-frame <frame>` `--scene-file <path>` `--scene-h5-path <template>`
+`--scene-occupied-value <int>` `--array <N|a-b>` `--voxel 0.02` `--dataset-size`
+`--batch-size` `--init-batch-size` `--obj-max` `--reach-max` `--time` `--sif` `--account`.
+
+The SLURM account is `--account`, else `slurm.account_gpu` from `site.yaml` (copy
+`site.example.yaml`; it is not versioned, so personal accounts stay out of git), else sbatch's
+default. Generation still runs only through SLURM; `heron generate`, with a local mode, comes
+with the ROS 2 Jazzy image (`docs/images.md`).
+
+## How it works
+
+`gen_dataset.sh` reads the robot and station through `heron shell-env` (which
+validates both files and their compatibility), validates the other inputs, stages a per-run
+**output directory** under `datasets/<out>/` (the robot `master_ik` is **hardlinked**
+in — instant, no extra disk), stages the rosbag to `$SCRATCH/rosbag/` for `real`,
+and submits `job.sbatch` as an array, passing every parameter via `--export`.
+
+`job.sbatch` bind-mounts the host files **over the container's installed paths** (no
+`.sif` rebuild): the output dir → `…/share/data_generation/data`, the parametrized
+launches → `…/share/data_generation/launch`. Because apptainer runs with `-C`
+(`--contain`), host env vars are **not** visible inside the container, so the
+parameters are forwarded with the `APPTAINERENV_` prefix. It then runs
+`run_generation.sh`, which
+picks the right `ros2 launch` for the mode and forwards `robot_config_file`,
+`base_link`, `world_file`, voxel/dataset params (and for `real`, the TF cameras config
++ `bag_file`). Output HDF5 is written by `data_generator.cpp` into the bound output
+directory.
+
+## Real mode: camera calibration via TF
+
+The camera pose is resolved from the rosbag's **TF tree** (the camera moved between
+recordings, so the old hardcoded extrinsics are not reused):
+
+- `config/cameras.tf.yaml` is a template with `extrinsics: []`, which makes `curobo_ros`
+  look up the transform from the robot base to the camera frame
+  (`camera_strategy.py:_parse_extrinsics` → `camera_depth_map_strategy.py`).
+- `--camera-frame` is substituted into `frame_id` at staging time, producing the
+  explicit `datasets/<out>/cameras.yaml` used by the job.
+- `generate_real_data.launch.py` replays `/tf` and `/tf_static` (in addition to the
+  two `/masked_depth_image/*` topics) so the lookup resolves.
+
+> **Base frame.** `camera_depth_map_strategy.py` looks up the transform against a frame
+> literally named **`base_link`**. For **leeloo** this is fine: `base_link` and the IK
+> base `base_0` are coincident frames, so the camera pose is correct. For a **different
+> robot** where `base_link` does **not** coincide with the curobo robot base, the
+> reconstructed obstacles would be offset — in that case make the camera lookup use the
+> robot's base (bind-override `camera_depth_map_strategy.py`). Either way, run a
+> **single test task first** (`--array 1`, small `--dataset-size`) and check the
+> obstacle/scene alignment in the output HDF5 before launching the full array.
+
+## Scene mode: RMs for scenes you already have
+
+Use this when the environment is already known as a **dense occupancy voxel grid**
+(not a rosbag to replay, not random cubes). One array task = one scene.
+
+```bash
+gen_dataset.sh --robot m1013 --station leeloo --mode scene --scene-file scenes.h5 --out scene_batch1
+```
+
+By default, `scenes.h5` is expected to follow the same layout the pipeline
+already writes: `group/<i>/voxel_grid` with `voxel_size` / `origine_x|y|z`
+attributes, and **occupancy convention `-1` = occupied, `1` = free** (matches
+`reachability_map.h5`). Real files often differ — override with:
+
+- `--scene-h5-path <template>`: dataset path per scene, `{i}` standing in for
+  the scene index, e.g. `--scene-h5-path 'voxel_grid/{i}'` for a
+  `voxel_grid/<i>` layout instead of `group/<i>/voxel_grid`. The group
+  containing `{i}` is enumerated (its numeric keys) to discover scene indices.
+  `voxel_size`/`origin` are looked up first as attributes on the matched
+  dataset, then falling back to file-root attributes (`resolution` / `origin`
+  as a 3-vector, or `origine_x|y|z`) — useful for files recorded straight from
+  a ROS topic, which tend to store these once for the whole file rather than
+  per scene.
+- `--scene-occupied-value <int>`: the raw value meaning "occupied" (default
+  `-1`). **Not auto-detected** — check your file (e.g. via `h5py`,
+  `f.attrs`/`ds.attrs`) and pass the right value explicitly, e.g. `0` for a
+  file using the `0=occupied` convention from the `data_generator.cpp:209`
+  comment.
+
+```bash
+gen_dataset.sh --robot m1013 --station leeloo --mode scene --scene-file scenes.h5 \
+    --scene-h5-path 'voxel_grid/{i}' --scene-occupied-value 0 --out scene_batch1
+```
+
+Both are handled entirely by `split_scenes.py` on the host, before the job is
+submitted: it resolves the source convention once and writes a canonical
+boolean `occupied` array into each scene's `.npz`, so `load_scene.py`
+(in-container) never has to guess a sign convention, and never sees the
+original HDF5 at all.
+
+`--array` is set automatically from the number of scenes found; pass it explicitly
+only to run a subset (e.g. `--array 1` to smoke-test one scene first).
+
+**Runtime.** One scene = one RM = `len(master_ik_data)/batch_size` IK service calls
+— about 4000 batches at voxel 0.02, ~1.2 s each, so **~1.5 h per scene** (measured,
+A100) on top of ~2 min of cuRobo startup. `--time` defaults to `4:00:00`; raise it
+if you lower `--batch-size`. Each array task does exactly one scene, so tasks run in
+parallel and total wall time is set by the queue, not by the scene count.
+
+### How the scene reaches cuRobo
+
+`load_scene.py` tries two routes, in order:
+
+1. **Native ESDF (default).** The grid becomes a `curobo.geom.types.VoxelGrid`
+   (`WorldConfig.voxel` + `CollisionCheckerType.VOXEL`) — cuRobo's own ESDF
+   obstacle type — via a new `/curobo_ik/load_voxel_scene` service. **No cuboid
+   decomposition at all**, so scene complexity costs nothing extra. Verified once on GPU
+   (`verify_voxel_esdf.py`, since removed: see the git history): an externally
+   supplied ESDF array *is* enforced by `WorldVoxelCollision` (+0.15 inside a solid
+   blob, −1.0 in free space).
+2. **Cuboid fallback.** If that service is missing or fails, the grid is merged into
+   axis-aligned boxes (exact — box volume equals occupied volume) and pushed through
+   the existing `/add_object`. Only viable for blocky scenes: on a noisy 64³ test
+   scene it still produced ~2000 boxes, well past the default `{"obb": 100}`
+   collision cache. It is a safety net, not the intended route.
+
+### No `.sif` rebuild required
+
+`curobo_ros` is pure Python, so route 1 ships as two files in `curobo_patch/`
+(`obstacle_manager.py`, `ros_service_manager.py`, copied from the image and
+extended). `job.sbatch` bind-mounts them over the container's installed copies —
+same trick already used for `DATA_DIR` / `LAUNCH_DIR`. Nothing is recompiled.
+`curobo_patch/README.md` lists every patched file, why, and what to do when the
+image is rebuilt; `docs/adr/0001-patch-container-files-by-bind-mount.md` records
+why the image is patched this way.
+
+### Why the HDF5 is split up front
+
+`data_generation.sif` has **no h5py**, and array tasks run `--network=none`, so
+nothing can be installed at job time. `gen_dataset.sh` therefore runs
+`split_scenes.py` on the login node (needs the `capacinet` conda env) to write
+`datasets/<out>/scenes/scene_<i>.npz`; each task then reads only its own file with
+plain numpy. This also sidesteps concurrent reads of one shared file on Lustre
+entirely — there is no shared handle to contend over, and no `HDF5_USE_FILE_LOCKING`
+workaround needed.
+
+## Post-processing (after generation)
+
+Raw HDF5 (`group/N/{voxel_grid, reachability_map}`) lands in `datasets/<out>/`, with a
+`dataset.yaml` manifest (robot, station, mode, voxel size, source).
+
+### Build a Corpus (`heron prepare`)
+
+A Corpus is one or more Datasets made ready for training (see `GLOSSARY.md`). Describe
+it in a recipe (`corpus/example.yaml` shows every key) and run:
+
+```bash
+heron prepare corpus/my_corpus.yaml            # here (small corpora)
+heron prepare corpus/my_corpus.yaml --submit   # as a SLURM CPU job (--account, --time, --mem)
+```
+
+It writes `<data root>/corpora/<name>/{train,val,test/<name>}/` in the pytorch-3dunet
+format (`raw` / `label`) plus `corpus.yaml` (recipe, crop, counts and sources per part).
+Compared with the former `unet_3d/script/` tools:
+
+- the validation part is drawn **by source** (a rosbag, a generated file, a scene), so
+  near-duplicate scenes never end up on both sides;
+- only the train part is augmented, by rotating the **full** scene about the robot base
+  (nearest neighbour, values stay binary), then cropping;
+- the crop comes from the station (`heron stations <name>`), and `origine_*` is updated;
+- Datasets with different voxel sizes are refused unless `resample_to` is set;
+- an existing corpus is never modified (`--force` rebuilds it from scratch).
+
+Datasets generated before manifests existed need one first:
+
+```bash
+heron dataset describe datasets/real_long_test --robot m1013 --station leeloo --mode real --voxel 0.02
+```

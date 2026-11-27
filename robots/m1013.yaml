@@ -1,0 +1,7 @@
+# Doosan m1013, the arm of the leeloo station.
+name: m1013
+# Empty: curobo_ros falls back to its built-in m1013 config
+# (curobo_doosan/src/m1013/m1013.yml inside the image).
+curobo_config: ""
+base_link: base_0
+reach: 2.0      # m, half side of the master map cube

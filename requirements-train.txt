@@ -1,0 +1,15 @@
+# Training and evaluation environment: the single source of truth for both runtimes.
+#   venv:      pip install -e '.[train]'
+#              On Alliance clusters, torch comes from the Alliance wheels but pytorch3dunet
+#              (pure Python) only from PyPI, so install in two steps:
+#                pip install --no-index torch torchvision tensorboard tqdm scikit-image
+#                pip install -e '.[train]'
+#   apptainer: images/training/Dockerfile installs this file, then the image is converted to .sif
+# pytorch3dunet is pinned: heron's checks (losses, config keys) are written against it.
+# torch is a range: each site uses its own build (Alliance wheels, PyPI, NVIDIA's for Jetson).
+pytorch3dunet==1.9.6
+torch>=2.2
+h5py
+numpy
+scipy
+PyYAML>=6
